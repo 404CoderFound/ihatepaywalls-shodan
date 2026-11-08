@@ -10,3 +10,7 @@ def test_api_reference_matches_public_and_privileged_feature_surface(system):
     assert "GET /api/search" in data["endpoints"]["public_read"]
     assert "GET/POST /api/admin/jobs" in data["endpoints"]["admin_control"]
     assert data["dataset_import"]["maximum_chunk_bytes"] > 0
+    routes={row["path"]:row for row in data["route_inventory"]}
+    assert routes["/api/admin/jobs"]["authorization"]=="administrator"
+    assert routes["/api/search"]["authorization"]=="public read or scoped read-only API key"
+    assert routes["/api/worker/jobs/claim"]["authorization"]=="worker token"

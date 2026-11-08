@@ -168,6 +168,7 @@ def docs():return {
         "worker":["POST /api/worker/register","POST /api/worker/heartbeat","GET /api/worker/jobs/next","POST /api/worker/jobs/{id}/results"]
     },
     "dataset_import":{"formats":["CSV","JSON array or object","JSONL"],"encoding":["identity","gzip"],"maximum_bytes":MAX_IMPORT_BYTES,"maximum_chunk_bytes":MAX_IMPORT_CHUNK,"resume":"Reuse the import id and continue at the returned byte offset; failed parsing can be retried with POST /api/admin/datasets/imports/{id}/resume"}
+    ,"route_inventory":[{"path":route.path,"methods":sorted(method for method in route.methods if method not in {"HEAD","OPTIONS"}),"authorization":"administrator" if route.path.startswith("/api/admin/") else "worker token" if route.path.startswith("/api/worker/") else "public read or scoped read-only API key"} for route in app.routes if getattr(route,"path","").startswith("/api/") and getattr(route,"methods",None)]
 }
 
 class SessionLogin(BaseModel):
