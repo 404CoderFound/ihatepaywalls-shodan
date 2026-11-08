@@ -149,3 +149,35 @@ git push origin main
 ## Current limitations
 
 SQLite and the persistent in-process enrichment/indexing executors are appropriate for v0.4 but should move behind PostgreSQL plus a dedicated queue before high-volume or multi-control-plane deployment. TLS collection currently records protocol, cipher, and SHA-256 certificate fingerprint rather than a complete parsed certificate chain. Certificate Transparency has an optional, administrator-enabled crt.sh adapter. Live passive DNS and commercial host-intelligence APIs are not bundled; permitted datasets can be ingested through the resumable dataset endpoint. Provider data is never converted into invented hosts or open services.
+
+## v1.0 development additions
+
+This branch adds read-only API keys, stored DNS history lookup, an importable CVE catalog, CIDR-scoped monitoring targets and observation alert history, indexed analytics, CSV observation export, and browser navigation for these data-backed sections. Admin keys are returned once and stored as SHA-256 hashes. Public API reads share the configured public rate limit. Monitoring events are created from ingested observation changes; they do not schedule scans.
+
+The current development scope is not commercial global host-index parity. It does not automatically sync NVD/CISA feeds, ingest large streaming/GZIP datasets, provide interactive geo maps or screenshots, send alert notifications, or correlate CVEs against CPE evidence. See [FEATURE_CHECKLIST.md](FEATURE_CHECKLIST.md) for verified status and remaining work.
+
+### Python SDK and CLI
+
+The dependency-free read client is in `sdk/client.py`. Example CLI calls:
+
+```sh
+export SCANLATTICE_URL=https://scanlattice.plezi.eu
+python3 cli.py search 'port:443 country:NL'
+python3 cli.py host 203.0.113.10
+python3 cli.py history 203.0.113.10
+python3 cli.py stats
+```
+
+Set `SCANLATTICE_API_KEY` to use a read-only key. Public search endpoints remain available without one.
+
+### Isolated staging profile
+
+`compose.staging.yaml` binds only to `127.0.0.1:18080` and uses the explicitly named `scanlattice_staging_data` volume. It does not read `.env` and disables passive network lookups by default. Start it with staging-only secrets:
+
+```sh
+STAGING_ADMIN_TOKEN='use-a-unique-staging-secret' \
+STAGING_ENROLLMENT_TOKEN='use-a-different-staging-secret' \
+docker compose -p scanlattice-staging -f compose.staging.yaml up -d --build
+```
+
+To test a database copy, make a verified backup first, place only the copy in `scanlattice_staging_data`, and set `DATABASE_PATH` to its copied filename. Do not attach `web_scanlattice_data` or `worker_worker_state` to staging. This checkout has not been supplied with a production database copy, so no restore has been run.

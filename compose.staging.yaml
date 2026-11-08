@@ -1,0 +1,23 @@
+# Isolated staging profile. Never points at production volumes or .env files.
+services:
+  web-staging:
+    build: .
+    restart: unless-stopped
+    environment:
+      DATABASE_PATH: /data/scanlattice-staging.db
+      ADMIN_TOKEN: ${STAGING_ADMIN_TOKEN:?Set a staging-only admin token}
+      ENROLLMENT_TOKEN: ${STAGING_ENROLLMENT_TOKEN:?Set a staging-only enrollment token}
+      SESSION_COOKIE_SECURE: "false"
+      PASSIVE_ENRICHMENT_ENABLED: "false"
+      SEED_DEMO: "false"
+    ports:
+      - "127.0.0.1:18080:8080"
+    volumes:
+      - scanlattice_staging_data:/data
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+volumes:
+  scanlattice_staging_data:
+    name: scanlattice_staging_data

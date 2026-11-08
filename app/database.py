@@ -172,6 +172,37 @@ def init_db(seed_demo: bool = False) -> None:
           records_processed INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL,
           error TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS api_keys (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE,
+          scopes TEXT NOT NULL DEFAULT '["search:read"]', created_at TEXT NOT NULL,
+          last_used_at TEXT NOT NULL DEFAULT '', revoked_at TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS dns_observations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, domain TEXT NOT NULL, record_type TEXT NOT NULL,
+          value TEXT NOT NULL, source TEXT NOT NULL, method TEXT NOT NULL DEFAULT 'imported',
+          observed_at TEXT NOT NULL, expires_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_dns_domain_time ON dns_observations(domain,observed_at DESC);
+        CREATE TABLE IF NOT EXISTS vulnerabilities (
+          cve TEXT PRIMARY KEY, description TEXT NOT NULL DEFAULT '', cvss REAL,
+          severity TEXT NOT NULL DEFAULT '', known_exploited INTEGER NOT NULL DEFAULT 0,
+          source TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS monitor_targets (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, target TEXT NOT NULL,
+          authorization_id INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL, FOREIGN KEY(authorization_id) REFERENCES authorizations(id)
+        );
+        CREATE TABLE IF NOT EXISTS monitor_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, target_id INTEGER, ip TEXT NOT NULL DEFAULT '',
+          event_type TEXT NOT NULL, details TEXT NOT NULL DEFAULT '{}', source TEXT NOT NULL,
+          created_at TEXT NOT NULL, acknowledged_at TEXT NOT NULL DEFAULT '',
+          FOREIGN KEY(target_id) REFERENCES monitor_targets(id)
+        );
+        CREATE TABLE IF NOT EXISTS saved_searches (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, query TEXT NOT NULL,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
         """)
         _add_columns(db, "observations", {
             "hostname": "TEXT NOT NULL DEFAULT ''", "service": "TEXT NOT NULL DEFAULT ''",

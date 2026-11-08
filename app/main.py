@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv, hashlib, hmac, io, ipaddress, json, math, os, secrets, time, uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
 from fastapi import Body, FastAPI, Header, HTTPException, Query, Request, Response
@@ -15,6 +16,7 @@ from .host_search import asn_intelligence, search_hosts
 from .passive import APPROVED_RDAP_BASES, provider_status, search_cached
 from .enrichment import enrichment_target, ensure_enrichment, queue_job, recover_pending, run_due_schedules_once, start_schedule_runner
 from .rate_limit import FixedWindowLimiter
+from .intelligence import router as intelligence_router
 
 ROOT=Path(__file__).resolve().parent
 ADMIN_TOKEN=os.getenv("ADMIN_TOKEN",""); ENROLLMENT_TOKEN=os.getenv("ENROLLMENT_TOKEN","")
@@ -28,6 +30,7 @@ MAX_ENRICHMENT_QUEUE=int(os.getenv("MAX_ENRICHMENT_QUEUE","100"))
 MAX_CAMPAIGN_TARGETS=int(os.getenv("MAX_CAMPAIGN_TARGETS","65536"));MAX_BATCH_TARGETS=int(os.getenv("MAX_BATCH_TARGETS","256"))
 RATE_LIMITER=FixedWindowLimiter()
 app=FastAPI(title="ScanLattice API",version="0.4.0",docs_url=None,redoc_url=None)
+app.include_router(intelligence_router)
 app.mount("/static",StaticFiles(directory=ROOT/"static"),name="static")
 
 @app.middleware("http")
@@ -35,7 +38,23 @@ async def bounded(request:Request,call_next):
     if int(request.headers.get("content-length","0"))>int(os.getenv("MAX_BODY_BYTES",str(2*1024*1024))):
         return JSONResponse({"detail":"Request body too large"},413)
     identity=request.client.host if request.client else "unknown"
-    public_path=request.url.path=="/api/search" or request.url.path.startswith("/api/hosts/") or request.url.path.startswith("/api/enrichment/")
+    request.state.api_scopes=[]
+    authorization=request.headers.get("authorization","")
+    api_token=authorization[7:] if authorization.lower().startswith("bearer ") else request.headers.get("x-api-key","")
+    if api_token:
+        with connection() as db:
+            key=db.execute("SELECT id,scopes FROM api_keys WHERE key_hash=? AND revoked_at=''",(digest(api_token),)).fetchone()
+            if key is None:return JSONResponse({"detail":"Invalid API key"},401)
+            request.state.api_scopes=json.loads(key["scopes"])
+            identity="api-key:"+str(key["id"])
+            db.execute("UPDATE api_keys SET last_used_at=? WHERE id=?",(utc_now(),key["id"]))
+        path=request.url.path
+        required_scope=("analytics:read" if path.startswith(("/api/analytics/","/api/reports/")) else
+                        "host:read" if path.startswith(("/api/hosts/","/api/domains/")) else
+                        "search:read" if path.startswith(("/api/search","/api/vulnerabilities")) else None)
+        if required_scope and required_scope not in request.state.api_scopes:
+            return JSONResponse({"detail":f"API key requires {required_scope} scope"},403)
+    public_path=request.url.path.startswith("/api/") and not request.url.path.startswith(("/api/admin/","/api/worker/")) and request.url.path not in {"/api/docs","/api/health"}
     if public_path:
         allowed,remaining=RATE_LIMITER.allow("public",identity,PUBLIC_RATE_LIMIT)
         if not allowed:return JSONResponse({"detail":"Public API rate limit exceeded"},429,headers={"Retry-After":"60","X-RateLimit-Remaining":"0"})
@@ -290,10 +309,20 @@ def store(db,rows:list[Observation],source:str,jid=None,wid=None):
             except ValueError:continue
         if matches:
             _,mapping,network=max(matches,key=lambda item:item[0]);network_prefix=str(network);asn=asn or mapping["asn"];org=org or mapping["organization"]
+        previous=db.execute("SELECT service,product FROM services WHERE host_ip=? AND port=? AND proto=?",(r.ip,r.port,r.proto)).fetchone()
         fingerprint=hashlib.sha256(json.dumps([r.ip,r.port,r.proto,r.service,r.product,r.banner,source,now],separators=(",",":"),sort_keys=True).encode()).hexdigest()
         observation=db.execute("INSERT INTO observations(ip,port,proto,hostname,asn,org,country,service,product,banner,source,seen_at,http_json,tls_json,ssh_id,latency_ms,scan_job_id,worker_id,observation_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(r.ip,r.port,r.proto,r.hostname,asn,org,r.country.upper(),r.service,r.product,r.banner,source,now,json.dumps(r.http),json.dumps(r.tls),r.ssh_id,r.latency_ms,jid,wid,fingerprint))
         db.execute("INSERT INTO hosts(ip,hostname,asn,org,country,first_seen,last_seen,last_scan_at,network_prefix,source,ip_version,ip_hex) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(ip) DO UPDATE SET hostname=CASE WHEN excluded.hostname!='' THEN excluded.hostname ELSE hosts.hostname END,asn=CASE WHEN excluded.asn!='' THEN excluded.asn ELSE hosts.asn END,org=CASE WHEN excluded.org!='' THEN excluded.org ELSE hosts.org END,country=CASE WHEN excluded.country!='' THEN excluded.country ELSE hosts.country END,last_seen=excluded.last_seen,last_scan_at=CASE WHEN excluded.last_scan_at!='' THEN excluded.last_scan_at ELSE hosts.last_scan_at END,network_prefix=CASE WHEN excluded.network_prefix!='' THEN excluded.network_prefix ELSE hosts.network_prefix END,source=excluded.source",(r.ip,r.hostname,asn,org,r.country.upper(),now,now,now if jid else "",network_prefix,source,address.version,f"{int(address):032x}"))
         db.execute("INSERT INTO services(host_ip,port,proto,service,product,first_seen,last_seen,last_observation_id,source,banner,http_json,tls_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(host_ip,port,proto) DO UPDATE SET service=excluded.service,product=excluded.product,last_seen=excluded.last_seen,last_observation_id=excluded.last_observation_id,source=excluded.source,banner=excluded.banner,http_json=excluded.http_json,tls_json=excluded.tls_json",(r.ip,r.port,r.proto,r.service,r.product,now,now,observation.lastrowid,source,r.banner,json.dumps(r.http),json.dumps(r.tls)))
+        if not previous or (previous["product"] != r.product and r.product):
+            event_type="service_observed" if not previous else "software_changed"
+            details={"port":r.port,"protocol":r.proto,"service":r.service,"product":r.product,"previous_product":previous["product"] if previous else ""}
+            for monitor in db.execute("SELECT id,target FROM monitor_targets WHERE enabled=1"):
+                try:scope=ipaddress.ip_network(monitor["target"],strict=False)
+                except ValueError:continue
+                if address.version==scope.version and address in scope:
+                    exists=db.execute("SELECT 1 FROM monitor_events WHERE target_id=? AND ip=? AND event_type=? AND created_at>? AND details=?",(monitor["id"],r.ip,event_type,str(datetime.now(timezone.utc).date()),json.dumps(details,sort_keys=True))).fetchone()
+                    if not exists:db.execute("INSERT INTO monitor_events(target_id,ip,event_type,details,source,created_at) VALUES(?,?,?,?,?,?)",(monitor["id"],r.ip,event_type,json.dumps(details,sort_keys=True),source,now))
         if r.hostname:db.execute("INSERT INTO hostnames(ip,hostname,source,first_seen,last_seen) VALUES(?,?,?,?,?) ON CONFLICT(ip,hostname,source) DO UPDATE SET last_seen=excluded.last_seen",(r.ip,r.hostname.lower(),source,now,now))
     return len(rows)
 
