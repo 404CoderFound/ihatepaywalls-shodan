@@ -69,7 +69,10 @@ async def bounded(request:Request,call_next):
     else:remaining=None
     session_token=request.cookies.get("scanlattice_session")
     session=None
-    explicit_admin_header=bool(request.headers.get("x-admin-token"))
+    supplied_admin_header=request.headers.get("x-admin-token")
+    header_authenticated=bool(ADMIN_TOKEN and supplied_admin_header and hmac.compare_digest(supplied_admin_header,ADMIN_TOKEN))
+    if request.url.path.startswith("/api/admin/") and supplied_admin_header and not header_authenticated:
+        return JSONResponse({"detail":"Invalid admin credentials"},401)
     if session_token:
         now=int(time.time())
         with connection() as db:
@@ -77,13 +80,13 @@ async def bounded(request:Request,call_next):
             db.execute("DELETE FROM admin_sessions WHERE expires_at<=?",(now,))
             if session:db.execute("UPDATE admin_sessions SET last_seen=? WHERE token_hash=?",(now,digest(session_token)))
         if session and request.url.path.startswith("/api/admin"):
-            if not explicit_admin_header and request.method not in {"GET","HEAD","OPTIONS"} and request.url.path!="/api/admin/session":
+            if not header_authenticated and request.method not in {"GET","HEAD","OPTIONS"} and request.url.path!="/api/admin/session":
                 csrf=request.headers.get("x-csrf-token","")
                 if not csrf or not hmac.compare_digest(digest(csrf),session["csrf_hash"]):return JSONResponse({"detail":"CSRF validation failed"},403)
             if "x-admin-token" not in request.headers:
                 request.scope["headers"].append((b"x-admin-token",ADMIN_TOKEN.encode()))
                 request._headers=Headers(scope=request.scope)
-    request.state.admin_authenticated=bool(session) or hmac.compare_digest(request.headers.get("x-admin-token",""),ADMIN_TOKEN) if ADMIN_TOKEN else False
+    request.state.admin_authenticated=bool(session) or header_authenticated
     response=await call_next(request)
     if remaining is not None:response.headers["X-RateLimit-Remaining"]=str(remaining)
     return response
@@ -157,6 +160,22 @@ def host(ip:str):
     for r in rows:latest.setdefault((r["port"],r["proto"]),r)
     return {"host":dict(h) if h else {"ip":ip,"last_scan_at":""},"services":rows,"latest_by_port":list(latest.values()),"passive_intelligence":passive,"potential_vulnerabilities":matches}
 
+def _route_inventory():
+    # FastAPI's deferred router inclusion stores intelligence routes in the
+    # included APIRouter until lifespan setup. Include them explicitly here so
+    # the published route inventory is complete both before and after startup.
+    routes=[*app.routes,*intelligence_router.routes]
+    seen=set();inventory=[]
+    for route in routes:
+        path=getattr(route,"path","");methods=getattr(route,"methods",None)
+        if not path.startswith("/api/") or not methods:continue
+        methods=sorted(method for method in methods if method not in {"HEAD","OPTIONS"})
+        key=(path,tuple(methods))
+        if key in seen:continue
+        seen.add(key)
+        inventory.append({"path":path,"methods":methods,"authorization":"administrator" if path.startswith("/api/admin/") else "worker token" if path.startswith("/api/worker/") else "public read or scoped read-only API key"})
+    return inventory
+
 @app.get("/api/docs")
 def docs():return {
     "version":"1.0.0",
@@ -167,11 +186,11 @@ def docs():return {
     "endpoints":{
         "public_read":["GET /api/search","GET /api/hosts/{ip}","GET /api/hosts/{ip}/observations","GET /api/domains/{domain}","GET /api/stats","GET /api/enrichment/{id}","GET /api/analytics/summary","GET /api/reports/export.csv","GET /api/vulnerabilities","GET /api/vulnerabilities/stats","GET /api/vulnerabilities/{cve}"],
         "admin_session":["POST /api/admin/session","GET /api/admin/session","POST /api/admin/session/logout"],
-        "admin_control":["GET/POST /api/admin/authorizations","GET /api/admin/hosts/{ip}/authorization","POST /api/admin/hosts/{ip}/screenshots","GET /api/admin/screenshots","GET /api/admin/screenshots/{id}/content","GET/POST /api/admin/jobs","POST /api/admin/jobs/{id}/cancel","GET /api/admin/workers","POST /api/admin/passive/providers","PUT /api/admin/passive/providers/{id}","POST /api/admin/datasets/imports (Content-Range chunk upload)","POST /api/admin/datasets/imports/{id}/resume","POST /api/admin/vulnerabilities/refresh","GET /api/admin/vulnerabilities/providers","GET/POST /api/admin/monitor/targets","GET/POST /api/admin/monitor/destinations","GET /api/admin/monitor/events","GET /api/admin/monitor/notifications","POST /api/admin/monitor/notifications/{id}/retry","POST /api/admin/monitor/events/{id}/acknowledge","GET/POST /api/admin/api-keys","GET/POST /api/admin/saved-searches"],
+        "admin_control":["GET/POST /api/admin/authorizations","GET /api/admin/hosts/{ip}/authorization","POST /api/admin/hosts/{ip}/screenshots","GET /api/admin/screenshots","GET /api/admin/screenshots/{id}/content","GET/POST /api/admin/jobs","POST /api/admin/jobs/{id}/cancel","GET /api/admin/workers","POST /api/admin/passive/providers","PUT /api/admin/passive/providers/{id}","POST /api/admin/datasets/imports (Content-Range chunk upload)","POST /api/admin/datasets/imports/{id}/resume","POST /api/admin/vulnerabilities/refresh","GET /api/admin/vulnerabilities/providers","GET/POST /api/admin/monitor/targets","GET/POST /api/admin/monitor/destinations","POST /api/admin/monitor/run-once","GET /api/admin/monitor/events","GET /api/admin/monitor/notifications","POST /api/admin/monitor/notifications/{id}/retry","POST /api/admin/monitor/events/{id}/acknowledge","GET/POST /api/admin/api-keys","GET/POST /api/admin/saved-searches"],
         "worker":["POST /api/worker/register","POST /api/worker/heartbeat","GET /api/worker/jobs/next","POST /api/worker/jobs/{id}/results"]
     },
     "dataset_import":{"formats":["CSV","JSON array or object","JSONL"],"encoding":["identity","gzip"],"maximum_bytes":MAX_IMPORT_BYTES,"maximum_chunk_bytes":MAX_IMPORT_CHUNK,"resume":"Reuse the import id and continue at the returned byte offset; failed parsing can be retried with POST /api/admin/datasets/imports/{id}/resume"}
-    ,"route_inventory":[{"path":route.path,"methods":sorted(method for method in route.methods if method not in {"HEAD","OPTIONS"}),"authorization":"administrator" if route.path.startswith("/api/admin/") else "worker token" if route.path.startswith("/api/worker/") else "public read or scoped read-only API key"} for route in app.routes if getattr(route,"path","").startswith("/api/") and getattr(route,"methods",None)]
+    ,"route_inventory":_route_inventory()
 }
 
 class SessionLogin(BaseModel):

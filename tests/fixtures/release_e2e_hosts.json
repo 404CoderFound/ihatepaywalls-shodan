@@ -1,0 +1,40 @@
+[
+  {
+    "ip_str": "198.51.100.40",
+    "asn": "AS64496",
+    "org": "ScanLattice E2E Fictional Transit",
+    "country_code": "NL",
+    "os": "Linux",
+    "hostnames": ["edge.fixture.example.test"],
+    "timestamp": "2026-10-01T12:00:00Z",
+    "data": [
+      {
+        "port": 443,
+        "transport": "tcp",
+        "service": "https",
+        "product": "nginx",
+        "version": "1.24.0",
+        "cpe": "cpe:2.3:a:nginx:nginx:1.24.0:*:*:*:*:*:*:*",
+        "banner": "[TEST FIXTURE ONLY] HTTP/1.1 200 OK\\nServer: nginx/1.24.0",
+        "http": {"title": "Fixture Admin Console", "status": 200, "headers": {"server": "nginx/1.24.0"}},
+        "ssl": {"cert": {"subject": {"CN": "edge.fixture.example.test"}, "issuer": {"CN": "Fixture Test CA"}, "fingerprint_sha256": "fixture-certificate-fingerprint"}}
+      },
+      {
+        "port": 22,
+        "transport": "tcp",
+        "service": "ssh",
+        "product": "OpenSSH",
+        "banner": "[TEST FIXTURE ONLY] SSH-2.0-OpenSSH_9.6"
+      }
+    ]
+  },
+  {
+    "ip": "198.51.100.41",
+    "asn": "AS64496",
+    "org": "ScanLattice E2E Fictional Transit",
+    "country": "NL",
+    "hostname": "host-only.fixture.example.test",
+    "source": "release-e2e-host-only-fixture",
+    "observed_at": "2026-10-01T12:00:00Z"
+  }
+]

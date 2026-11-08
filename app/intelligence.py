@@ -26,7 +26,7 @@ from .database import connection, utc_now
 from . import database as database_module
 from .ingestion import iter_dataset_records, normalize_record
 from .vulnerability_feeds import _provider_state, correlate_all, upsert_vulnerabilities, update_kev, update_nvd
-from .monitoring import _validate_public_https
+from .monitoring import _validate_public_https, run_monitoring_checks_once
 
 router = APIRouter(prefix="/api", tags=["intelligence"])
 
@@ -466,6 +466,17 @@ def list_monitor_notifications(request: Request, page: int=Query(1,ge=1)):
           FROM monitor_notifications n JOIN monitor_destinations d ON d.id=n.destination_id
           JOIN monitor_events e ON e.id=n.event_id ORDER BY n.id DESC LIMIT 100 OFFSET ?""",((page-1)*100,))]
     return {"results":rows,"page":page,"per_page":100,"total":total}
+
+
+@router.post("/admin/monitor/run-once")
+async def run_monitor_checks(request: Request):
+    _admin(request)
+    before=int(time.time())
+    created=await asyncio.to_thread(run_monitoring_checks_once)
+    with connection() as db:
+        statuses=[dict(row) for row in db.execute("SELECT status,COUNT(*) count FROM monitor_notifications GROUP BY status")]
+        latest=db.execute("SELECT MAX(created_at) FROM monitor_events WHERE created_at>=?",(datetime.fromtimestamp(before,timezone.utc).isoformat(timespec="seconds"),)).fetchone()[0]
+    return {"created_events":created,"latest_event_at":latest,"notification_status":statuses}
 
 
 @router.post("/admin/monitor/notifications/{notification_id}/retry")

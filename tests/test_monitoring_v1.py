@@ -55,3 +55,19 @@ def test_webhook_destination_rejects_private_addresses_and_admin_is_required(sys
     response=client.post("/api/admin/monitor/destinations",headers=admin_headers,json=body)
     assert response.status_code==422
     assert client.get("/api/admin/monitor/destinations").status_code==401
+
+
+def test_admin_run_once_checks_cert_expiry_and_delivers_outbox(system,admin_headers,monkeypatch):
+    client,main,database=system
+    future=(datetime.now(timezone.utc)+timedelta(days=7)).isoformat()
+    with database.connection() as db:
+        main.store(db,[main.Observation(ip="127.0.0.8",port=443,service="https",tls={"cert":{"not_after":future}},source="run-once-fixture")],"run-once-fixture")
+    _monitor(client,admin_headers,target="127.0.0.8/32")
+    assert client.post("/api/admin/monitor/destinations",headers=admin_headers,json={"name":"run-once inbox","kind":"email","endpoint":"alerts@example.test"}).status_code==200
+    delivered=[]
+    monkeypatch.setattr("app.monitoring._send_email",lambda address,payload:delivered.append(payload["event_type"]))
+    assert client.post("/api/admin/monitor/run-once").status_code==401
+    run=client.post("/api/admin/monitor/run-once",headers=admin_headers)
+    assert run.status_code==200 and run.json()["created_events"]==1
+    assert delivered==["certificate_expiring"]
+    assert client.get("/api/admin/monitor/notifications",headers=admin_headers).json()["results"][0]["status"]=="delivered"

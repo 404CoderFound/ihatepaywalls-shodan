@@ -7,12 +7,19 @@
 5. Python SDK/CLI, endpoint documentation, provider controls, import UI, offline interactive country map and authorized private screenshot library: implemented; automated capture remains external to the application.
 6. Isolated staging Compose, CI checks and validation script: defined. Local Docker runtime and restore tests are blocked by Docker unavailability and the lack of an operator-provided database copy.
 
-## Remaining work and exact handoff
+## Release readiness checkpoint (2026-11-08)
 
-- Run the full local suite, Python compilation, JavaScript syntax checks, Compose configuration check (when Docker is installed) and inspect migration behavior against an operator-provided sanitized production DB copy.
-- Run `STAGING_ADMIN_TOKEN=... STAGING_ENROLLMENT_TOKEN=... scripts/validate_staging.sh` on a Docker-capable staging host using staging-only credentials.
-- If automated screenshot capture is added later, run it only on registered workers and constrain all browser requests to the explicitly authorized asset scope. Current UI supports private manual screenshot upload and access control without probing targets.
-- Run the NVD initial catalog backfill and provider integrations only after operators supply credentials, acceptable quotas, and licensed/redistributable dataset sources.
-- Review `MIGRATION_GUIDE.md` before any future production cutover. No production action is authorized by this plan.
+- Local integrated pytest suite: 59 passed, 1 skipped, 3 framework/client deprecation warnings.
+- Local loopback end-to-end harness passed using fresh SQLite state and reserved TEST-NET fixtures; it verified imports/search/ASN/history/CVE/monitoring/maps/screenshots/API/CLI/sessions/worker scheduling and bounded result ingestion.
+- Frozen v0.4 snapshot migration check passed without losing fixture rows; no operator database was supplied.
+- CSRF now requires a valid session token on browser mutations even if a bad admin header is supplied. The admin monitoring run-once route is protected and included in the API reference inventory.
+- Docker Engine/Compose is unavailable in the current environment. No image build or container test has been claimed. `scripts/validate_staging.sh` and `RELEASE_READINESS.md` contain the isolated staging execution path.
 
-The production cutover, external API credentials, redistribution permissions, and a real owned scan target remain operator-controlled. No production system or volume is accessed here.
+### Exact remaining release gates
+
+1. Run `scripts/validate_staging.sh` on an isolated Debian 13 Docker host with unique staging-only credentials; retain command output and logs.
+2. Validate the deployed Scanner01 worker registration/claim/result protocol and upgrade compatibility on staging.
+3. Restore an authorized sanitized v0.4 database copy into staging; verify integrity, row counts, representative searches, worker registration, backup restore, and rollback.
+4. Validate actual NVD/KEV and approved passive-provider refreshes with operator credentials, quotas, and licensing/usage approval. Validate SMTP/webhook delivery and retry behavior.
+5. Resolve or explicitly accept the one skipped automated test and approve any remaining limitations in `FEATURE_CHECKLIST.md`.
+6. Review `MIGRATION_GUIDE.md`, backups, TLS/secure cookies, production secrets, provider/license requirements, and the production change plan. No production action is authorized or performed by this plan.

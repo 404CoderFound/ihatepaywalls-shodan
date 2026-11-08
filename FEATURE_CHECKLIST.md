@@ -24,7 +24,10 @@ Status records what is implemented in this checkout, not parity with a commercia
 
 ## Verification evidence (2026-11-08)
 
-- `./.venv/bin/pytest -q`: 56 passed, 1 skipped, 3 dependency/framework deprecation warnings.
-- `python -m py_compile app/*.py sdk/client.py cli.py` and `node --check` are in CI.
-- `scripts/validate_staging.sh` provides isolated Compose health/API validation and retains its named staging volume on teardown.
-- Docker is not installed in the local development environment; the staging container workflow has not been run locally. CI is configured to run it on a Docker-capable runner.
+- `./.venv/bin/python -m pytest -q`: 59 passed, 1 skipped, 3 dependency/framework deprecation warnings.
+- `tests/test_v04_migration_readiness.py` builds the fixture from the v0.4 schema snapshot and verifies preserved row counts/representative records plus SQLite integrity after current initialization.
+- `scripts/staging_e2e.py` passed against a fresh local loopback Uvicorn + SQLite instance. It covered chunk streaming import, search/ASN attribution, passive-only records, history, CVE correlation, monitoring/outbox, map analytics, screenshots, docs/API key/CLI, CSRF sessions, and worker schedule/lease/result-scope flow. It uses reserved TEST-NET addresses and makes no target connections.
+- `.venv/bin/python -m py_compile app/*.py sdk/client.py cli.py scripts/staging_e2e.py`, `node --check app/static/app.js`, `node --check app/static/insights.js`, and `git diff --check` passed.
+- `scripts/validate_staging.sh` builds and validates an isolated Compose profile, binds only to loopback, uses a project-scoped volume, and retains that volume after container teardown.
+- Docker is unavailable locally; container tests have not been run. CI is configured to run the Compose validator on a Docker-capable runner, but no CI result is available in this audit.
+- See `RELEASE_READINESS.md` for incomplete features, provider dependencies, exact Debian 13 staging steps, rollback, and production gates.

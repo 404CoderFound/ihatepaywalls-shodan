@@ -105,6 +105,18 @@ def test_admin_session_can_create_authorized_job_with_csrf(system):
     assert client.post("/api/admin/jobs",json={"target":"127.0.0.1/32","profile_id":1,"ports":[80]}).status_code==403
 
 
+def test_invalid_admin_header_cannot_disable_browser_csrf(system):
+    client,_,_=system
+    login=client.post("/api/admin/session",json={"admin_token":"admin-test-token"})
+    assert login.status_code==200
+    path="/api/admin/saved-searches"
+    body={"name":"csrf regression","query":"port:443"}
+    assert client.post(path,json=body).status_code==403
+    assert client.post(path,headers={"X-Admin-Token":"attacker-value"},json=body).status_code==401
+    csrf=login.json()["csrf_token"]
+    assert client.post(path,headers={"X-CSRF-Token":csrf},json=body).status_code==200
+
+
 def test_public_api_rate_limit(system):
     client, main, _ = system
     main.PUBLIC_RATE_LIMIT=2;main.RATE_LIMITER.clear()

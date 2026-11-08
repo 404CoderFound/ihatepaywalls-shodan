@@ -9,6 +9,8 @@ services:
       ENROLLMENT_TOKEN: ${STAGING_ENROLLMENT_TOKEN:?Set a staging-only enrollment token}
       SESSION_COOKIE_SECURE: "false"
       PASSIVE_ENRICHMENT_ENABLED: "false"
+      MONITORING_AUTO_CHECKS: "false"
+      VULNERABILITY_AUTO_REFRESH: "false"
       SEED_DEMO: "false"
     ports:
       - "127.0.0.1:${STAGING_PORT:-18080}:8080"
@@ -20,4 +22,3 @@ services:
     cap_drop: ["ALL"]
 volumes:
   scanlattice_staging_data:
-    name: scanlattice_staging_data

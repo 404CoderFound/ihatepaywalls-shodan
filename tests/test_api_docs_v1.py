@@ -14,3 +14,5 @@ def test_api_reference_matches_public_and_privileged_feature_surface(system):
     assert routes["/api/admin/jobs"]["authorization"]=="administrator"
     assert routes["/api/search"]["authorization"]=="public read or scoped read-only API key"
     assert routes["/api/worker/jobs/claim"]["authorization"]=="worker token"
+    assert routes["/api/admin/monitor/run-once"]["authorization"]=="administrator"
+    assert any(row.endswith("/api/admin/monitor/run-once") for row in data["endpoints"]["admin_control"])
