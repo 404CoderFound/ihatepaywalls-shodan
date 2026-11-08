@@ -152,7 +152,7 @@ SQLite and in-process enrichment/indexing executors are suitable for a single co
 
 ## v1.0 development additions
 
-This branch adds read-only API keys, stored DNS history lookup, an importable CVE catalog, CIDR-scoped monitoring targets and observation alert history, indexed analytics, CSV observation export, and browser navigation for these data-backed sections. Admin keys are returned once and stored as SHA-256 hashes. Public API reads share the configured public rate limit. Monitoring events are created from ingested observation changes; they do not schedule scans.
+The v1.0 increment adds read-only API keys, resumable dataset ingestion, official vulnerability-feed adapters, evidence-based potential CPE matches, authorized monitoring and notification delivery, real indexed analytics, an offline interactive map, CSV export and browser controls for these features. Administrator APIs require server-side authorization; public search never schedules active scans. See the checklist for verified scope and known limitations.
 
 The project provides an importable host index and configurable provider adapters; it does not claim commercial global host-index coverage. NVD and CISA KEV adapters, streaming dataset imports, potential CPE correlations, monitoring notifications, data-backed analytics and an offline interactive country choropleth are implemented. Authorized screenshot capture remains incomplete. See [FEATURE_CHECKLIST.md](FEATURE_CHECKLIST.md) for verified status and remaining work. The bundled map boundaries come from [Natural Earth](https://www.naturalearthdata.com/about/), whose vector and raster data are public domain.
 
