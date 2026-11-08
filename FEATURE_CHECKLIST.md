@@ -12,7 +12,7 @@ Status records what is implemented in this checkout, not parity with a commercia
 | Domain history | Imported/stored DNS and passive associations readable; direct DNS history import is admin-only; no application-service probing on public search |
 | CVE catalog | Official NVD 2.0 and CISA KEV adapters; bounded retry; resumable NVD pagination; optional daily schedule; CPE range matching and potential-only host correlation; feed import/search/detail/stats tested. Initial full-catalog backfill and live network sync not run |
 | Monitoring | Authorized IP/CIDR targets; new-service/software/certificate/vulnerability-change events; expiring certificate checks; optional scheduler; per-event cooldown, acknowledgement, email/webhook outbox, retry and delivery history implemented. Requires configured SMTP/webhook destinations and scheduler opt-in |
-| Maps/trends/reports | Real country/port/product/daily aggregates and source-aware CSV export; search facets use full query result set; interactive geographic map remains incomplete |
+| Maps/trends/reports | Interactive offline choropleth using bundled Natural Earth 1:110m boundaries and real indexed country counts; country click-through, hover counts, actual observation-date trends, other aggregates and source-aware CSV export implemented |
 | Saved searches | Admin saved-search storage API implemented; edit/delete/user ownership and UI remain incomplete |
 | Python SDK/CLI | Dependency-free search/host/history/vulnerability/analytics client, resumable dataset upload and CLI implemented; administrator operations beyond dataset ingestion remain REST-only |
 | Separate authorized scanning workers | Existing architecture preserved; no new scan protocols or scheduler expansion in this work |
@@ -24,7 +24,7 @@ Status records what is implemented in this checkout, not parity with a commercia
 
 ## Verification evidence (2026-11-08)
 
-- `./.venv/bin/pytest -q`: 51 passed, 1 skipped, 3 dependency/framework deprecation warnings.
+- `./.venv/bin/pytest -q`: 53 passed, 1 skipped, 3 dependency/framework deprecation warnings.
 - `python -m py_compile app/*.py sdk/client.py cli.py` and `node --check` are in CI.
 - `scripts/validate_staging.sh` provides isolated Compose health/API validation and retains its named staging volume on teardown.
 - Docker is not installed in the local development environment; the staging container workflow has not been run locally. CI is configured to run it on a Docker-capable runner.
