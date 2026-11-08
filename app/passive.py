@@ -35,10 +35,15 @@ def _network_matches(query: str, row: dict[str, Any]) -> bool:
 def _matches(row: dict[str, Any], parsed: ParsedQuery) -> bool:
     filters = parsed.filters
     for key, values in filters.items():
-        if key in {"port", "product", "service", "country"}:
-            return False  # Passive records never imply an observed service.
+        if key in {"product", "service", "country"}:
+            return False  # This adapter has no service banners, product names or location data.
         for value in values:
-            if key == "net":
+            if key=="port":
+                if row["record_type"]!="internetdb-host":return False
+                try:ports=json.loads(row["value_json"]).get("ports",[])
+                except (ValueError,TypeError):return False
+                if int(value) not in ports:return False
+            elif key == "net":
                 if not _network_matches(value, row):
                     return False
             elif key == "ip" and row["ip"].lower() != value.lower():
@@ -52,7 +57,14 @@ def _matches(row: dict[str, Any], parsed: ParsedQuery) -> bool:
             elif key == "org" and value.lower() not in row["org"].lower():
                 return False
     haystack = " ".join(str(row.get(k, "")) for k in ("subject", "ip", "domain", "asn", "org", "network", "record_type", "value_json", "source")).lower()
-    return all(token.lower() in haystack for token in parsed.free)
+    if not all(token.lower() in haystack for token in parsed.free):return False
+    for key,value in parsed.excluded:
+        if key=="port" and row["record_type"]=="internetdb-host":
+            try:
+                if int(value) in json.loads(row["value_json"]).get("ports",[]):return False
+            except (ValueError,TypeError):pass
+        elif key is None and value.lower() in haystack:return False
+    return True
 
 
 def search_cached(db, parsed: ParsedQuery) -> list[dict[str, Any]]:

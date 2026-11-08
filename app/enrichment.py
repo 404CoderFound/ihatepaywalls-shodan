@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from .database import connection, utc_now
+from .database import connection, upsert_host_identity, utc_now
 from .search import ParsedQuery
 
 USER_AGENT = "ScanLattice/0.4 (+https://scanlattice.plezi.eu; passive intelligence cache)"
@@ -26,6 +26,7 @@ _SCHEDULER_STARTED = False
 class ProviderResult:
     records: list[dict[str, Any]] = field(default_factory=list)
     error: str = ""
+    ttl_seconds: int = 86400
 
 
 def enrichment_target(parsed: ParsedQuery) -> tuple[str, str] | None:
@@ -133,7 +134,26 @@ class CertificateTransparencyProvider:
         except Exception as exc:return ProviderResult(error=str(exc)[:500])
 
 
-PROVIDER_CLASSES = {"ripestat": RIPEstatProvider, "rdap": RDAPProvider, "certificate_transparency": CertificateTransparencyProvider}
+class ShodanInternetDBProvider:
+    """Passive, provider-hosted IP metadata only. No target connection is made by this adapter."""
+    provider_type="shodan_internetdb"
+    base="https://internetdb.shodan.io/"
+
+    def lookup(self,kind: str,value: str,source: str) -> ProviderResult:
+        if kind!="ip":return ProviderResult(error="unsupported query type")
+        try:
+            address=ipaddress.ip_address(value)
+            if not address.is_global:return ProviderResult(error="provider lookup is limited to global IP addresses")
+            payload=_fetch_json(self.base+urllib.parse.quote(str(address),safe=""),timeout=6)
+            if payload.get("ip")!=str(address):raise ValueError("Provider returned a different IP")
+            record={key:payload[key] for key in ("ports","cpes","hostnames","tags","vulns") if isinstance(payload.get(key),list)}
+            if not any(record.values()):return ProviderResult(error="provider returned no usable intelligence")
+            now=utc_now();record.update({"provider":"Shodan InternetDB","update_cadence":"weekly","banners_available":False})
+            return ProviderResult(records=[_record(str(address),"ip",source,"internetdb-host",record,now,ip=str(address))],ttl_seconds=7*86400)
+        except Exception as exc:return ProviderResult(error=str(exc)[:500])
+
+
+PROVIDER_CLASSES = {"ripestat": RIPEstatProvider, "rdap": RDAPProvider, "certificate_transparency": CertificateTransparencyProvider,"shodan_internetdb":ShodanInternetDBProvider}
 
 
 def _compact_rdap(data: dict[str, Any]) -> dict[str, Any]:
@@ -172,6 +192,11 @@ def _store_records(db, provider_id: int, records: list[dict[str, Any]], ttl: int
                         db.execute("UPDATE hosts SET asn=?,org=CASE WHEN ?!='' THEN ? ELSE org END,network_prefix=? WHERE ip=?",(row["asn"].upper(),row.get("org",""),row.get("org",""),str(network),host["ip"]))
             except ValueError:
                 pass
+        if row.get("ip"):
+            value=row.get("value",{}) if isinstance(row.get("value",{}),dict) else {}
+            hostnames=value.get("hostnames",[]) if isinstance(value.get("hostnames",[]),list) else []
+            upsert_host_identity(db,row["ip"],row["source"],row["observed_at"],row.get("domain", "") or (hostnames[0] if hostnames else ""),row.get("asn", ""),row.get("org", ""),str(value.get("country_code") or "").upper())
+            for hostname in hostnames[1:]:upsert_host_identity(db,row["ip"],row["source"],row["observed_at"],str(hostname))
     return count
 
 
@@ -217,18 +242,19 @@ def run_job(job_id: str) -> None:
         providers=db.execute("SELECT * FROM passive_providers WHERE enabled=1 ORDER BY id").fetchall()
         relevant=[p for p in providers if p["provider_type"] in PROVIDER_CLASSES]
         db.execute("UPDATE enrichment_jobs SET attempts=attempts+1,started_at=COALESCE(started_at,?),providers_total=?,updated_at=? WHERE id=?",(utc_now(),len(relevant),utc_now(),job_id))
-    successes=0;completed=0;added=0;errors=[]
+    successes=0;completed=0;added=0;errors=[];cache_ttl=86400
     for provider in relevant:
         with connection() as db:
             if not _consume_quota(db,provider):errors.append(f"{provider['name']}: quota reached");continue
         result=PROVIDER_CLASSES[provider["provider_type"]]().lookup(job["query_type"],job["query_value"],provider["name"])
         completed+=1
         if result.records:
-            with connection() as db:added+=_store_records(db,provider["id"],result.records)
+            with connection() as db:added+=_store_records(db,provider["id"],result.records,result.ttl_seconds)
             successes+=1
+            cache_ttl=max(cache_ttl,result.ttl_seconds)
         if result.error and result.error!="unsupported query type":errors.append(f"{provider['name']}: {result.error}")
     status="completed" if successes and not errors else "partial" if successes else "failed"
-    with connection() as db:db.execute("UPDATE enrichment_jobs SET status=?,providers_completed=?,records_added=?,error=?,updated_at=?,completed_at=?,cache_expires_at=? WHERE id=?",(status,completed,added,"; ".join(errors)[:2000],utc_now(),utc_now(),int(time.time())+86400 if successes else int(time.time())+300,job_id))
+    with connection() as db:db.execute("UPDATE enrichment_jobs SET status=?,providers_completed=?,records_added=?,error=?,updated_at=?,completed_at=?,cache_expires_at=? WHERE id=?",(status,completed,added,"; ".join(errors)[:2000],utc_now(),utc_now(),int(time.time())+cache_ttl if successes else int(time.time())+300,job_id))
 
 
 def recover_pending() -> None:

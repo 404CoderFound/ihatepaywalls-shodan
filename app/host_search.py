@@ -11,10 +11,9 @@ from .search import ParsedQuery
 PER_PAGE = 10
 
 
-def _where(parsed: ParsedQuery) -> tuple[str, list[Any]]:
-    clauses: list[str] = []
-    params: list[Any] = []
-    for key, values in parsed.filters.items():
+def _where_group(filters,free) -> tuple[list[str],list[Any]]:
+    clauses: list[str] = [];params: list[Any] = []
+    for key, values in filters.items():
         for value in values:
             if key == "ip": clauses.append("h.ip=?");params.append(value)
             elif key == "asn": clauses.append("UPPER(h.asn)=?");params.append(value.upper())
@@ -22,30 +21,61 @@ def _where(parsed: ParsedQuery) -> tuple[str, list[Any]]:
             elif key == "org": clauses.append("LOWER(h.org) LIKE ?");params.append(f"%{value.lower()}%")
             elif key in {"hostname","domain"}:
                 clauses.append("(LOWER(h.hostname) LIKE ? OR EXISTS(SELECT 1 FROM hostnames hn WHERE hn.ip=h.ip AND LOWER(hn.hostname) LIKE ?))");params.extend([f"%{value.lower()}%"]*2)
-            elif key == "port": clauses.append("EXISTS(SELECT 1 FROM services s WHERE s.host_ip=h.ip AND s.port=?)");params.append(int(value))
+            elif key == "port": clauses.append("(EXISTS(SELECT 1 FROM services s WHERE s.host_ip=h.ip AND s.port=?) OR EXISTS(SELECT 1 FROM passive_records pr,json_each(pr.value_json,'$.ports') p WHERE pr.ip=h.ip AND pr.record_type='internetdb-host' AND CAST(p.value AS INTEGER)=?))");params.extend([int(value),int(value)])
             elif key == "service": clauses.append("EXISTS(SELECT 1 FROM services s WHERE s.host_ip=h.ip AND LOWER(s.service)=LOWER(?))");params.append(value)
             elif key == "product": clauses.append("EXISTS(SELECT 1 FROM services s WHERE s.host_ip=h.ip AND LOWER(s.product) LIKE ?)");params.append(f"%{value.lower()}%")
             elif key == "source": clauses.append("(LOWER(h.source)=LOWER(?) OR EXISTS(SELECT 1 FROM services s WHERE s.host_ip=h.ip AND LOWER(s.source)=LOWER(?)))");params.extend([value,value])
+            elif key == "os": clauses.append("LOWER(h.os_name) LIKE ?");params.append(f"%{value.lower()}%")
+            elif key == "http.title": clauses.append("EXISTS(SELECT 1 FROM services s WHERE s.host_ip=h.ip AND LOWER(COALESCE(json_extract(s.http_json,'$.title'),'')) LIKE ?)");params.append(f"%{value.lower()}%")
+            elif key == "http.headers": clauses.append("EXISTS(SELECT 1 FROM services s WHERE s.host_ip=h.ip AND LOWER(s.http_json) LIKE ?)");params.append(f"%{value.lower()}%")
+            elif key == "ssl.cert.subject.cn": clauses.append("EXISTS(SELECT 1 FROM services s WHERE s.host_ip=h.ip AND (LOWER(COALESCE(json_extract(s.tls_json,'$.cert.subject.CN'),json_extract(s.tls_json,'$.cert.subject.cn'),'')) LIKE ? OR LOWER(s.tls_json) LIKE ?))");params.extend([f"%{value.lower()}%",f"%{value.lower()}%"])
+            elif key == "ssl.cert.issuer.cn": clauses.append("EXISTS(SELECT 1 FROM services s WHERE s.host_ip=h.ip AND (LOWER(COALESCE(json_extract(s.tls_json,'$.cert.issuer.CN'),json_extract(s.tls_json,'$.cert.issuer.cn'),'')) LIKE ? OR LOWER(s.tls_json) LIKE ?))");params.extend([f"%{value.lower()}%",f"%{value.lower()}%"])
+            elif key == "cpe": clauses.append("EXISTS(SELECT 1 FROM services s WHERE s.host_ip=h.ip AND LOWER(s.cpe) LIKE ?)");params.append(f"%{value.lower()}%")
+            elif key == "vuln": clauses.append("EXISTS(SELECT 1 FROM host_vulnerability_matches v WHERE v.host_ip=h.ip AND UPPER(v.cve)=UPPER(?))");params.append(value)
+            elif key == "before": clauses.append("h.last_seen<?");params.append(value+"T23:59:59")
+            elif key == "after": clauses.append("h.last_seen>=?");params.append(value+"T00:00:00")
+            elif key == "has_screenshot":
+                if value.lower()=="true":clauses.append("0") # No screenshot storage is configured.
             elif key == "net":
                 network=ipaddress.ip_network(value,strict=False);start=f"{int(network.network_address):032x}";end=f"{int(network.broadcast_address):032x}"
                 clauses.append("h.ip_version=? AND h.ip_hex BETWEEN ? AND ?");params.extend([network.version,start,end])
-    for token in parsed.free:
+    for token in free:
         like=f"%{token.lower()}%";clauses.append("(LOWER(h.ip) LIKE ? OR LOWER(h.hostname) LIKE ? OR LOWER(h.org) LIKE ? OR EXISTS(SELECT 1 FROM services s WHERE s.host_ip=h.ip AND (LOWER(s.service) LIKE ? OR LOWER(s.product) LIKE ? OR LOWER(s.banner) LIKE ?)))");params.extend([like]*6)
-    return (" WHERE "+" AND ".join(f"({clause})" for clause in clauses) if clauses else ""),params
+    return clauses,params
 
 
-def search_hosts(db: sqlite3.Connection, parsed: ParsedQuery, page: int) -> dict[str, Any]:
+def _where(parsed: ParsedQuery) -> tuple[str, list[Any]]:
+    groups=[(parsed.filters,parsed.free),*parsed.alternatives]
+    group_sql=[];params=[]
+    for filters,free in groups:
+        clauses,values=_where_group(filters,free)
+        if clauses:group_sql.append("("+" AND ".join(f"({clause})" for clause in clauses)+")");params.extend(values)
+    clauses=["("+" OR ".join(group_sql)+")"] if group_sql else []
+    for key,value in parsed.excluded:
+        filters={key:[value]} if key else {};free=[] if key else [value]
+        negative,values=_where_group(filters,free)
+        if negative:clauses.append("NOT ("+" AND ".join(f"({item})" for item in negative)+")");params.extend(values)
+    return (" WHERE "+" AND ".join(clauses) if clauses else ""),params
+
+
+def search_hosts(db: sqlite3.Connection, parsed: ParsedQuery, page: int, sort: str="last_seen", per_page: int=PER_PAGE) -> dict[str, Any]:
     where,params=_where(parsed);total=db.execute("SELECT COUNT(*) FROM hosts h"+where,params).fetchone()[0]
-    total_pages=math.ceil(total/PER_PAGE) if total else 0;page=min(page,total_pages) if total_pages else 1;offset=(page-1)*PER_PAGE
-    rows=[dict(row) for row in db.execute("SELECT h.* FROM hosts h"+where+" ORDER BY h.last_seen DESC,h.ip_version,h.ip_hex,h.ip LIMIT ? OFFSET ?",params+[PER_PAGE,offset])]
+    total_pages=math.ceil(total/per_page) if total else 0;page=min(page,total_pages) if total_pages else 1;offset=(page-1)*per_page
+    order={"last_seen":"h.last_seen DESC,h.ip_version,h.ip_hex,h.ip","first_seen":"h.first_seen DESC,h.ip_version,h.ip_hex,h.ip","ip":"h.ip_version,h.ip_hex,h.ip"}[sort]
+    rows=[dict(row) for row in db.execute("SELECT h.* FROM hosts h"+where+" ORDER BY "+order+" LIMIT ? OFFSET ?",params+[per_page,offset])]
     for host in rows:
         services=[]
-        for row in db.execute("SELECT port,proto,service,product,banner,http_json,tls_json,source,last_seen FROM services WHERE host_ip=? ORDER BY port,proto",(host["ip"],)):
+        for row in db.execute("SELECT port,proto,service,product,banner,http_json,tls_json,source,last_seen,cpe FROM services WHERE host_ip=? ORDER BY port,proto",(host["ip"],)):
             service=dict(row);service["http"]=json.loads(service.pop("http_json") or "{}");service["tls"]=json.loads(service.pop("tls_json") or "{}");services.append(service)
         host["services"]=services
         host["hostnames"]=[dict(row) for row in db.execute("SELECT hostname,source,last_seen FROM hostnames WHERE ip=? ORDER BY last_seen DESC,hostname",(host["ip"],))]
-    start=offset+1 if total else 0;end=min(offset+PER_PAGE,total)
-    return {"hosts":rows,"page":page,"per_page":PER_PAGE,"total":total,"total_pages":total_pages,"has_next":page<total_pages,"has_previous":page>1,"range_start":start,"range_end":end}
+    start=offset+1 if total else 0;end=min(offset+per_page,total)
+    service_filter=where;passive_filter=where
+    port_query="SELECT port,COUNT(DISTINCT ip) hosts FROM (SELECT s.port port,s.host_ip ip FROM services s JOIN hosts h ON h.ip=s.host_ip"+service_filter+" UNION ALL SELECT CAST(p.value AS INTEGER) port,pr.ip ip FROM passive_records pr JOIN hosts h ON h.ip=pr.ip,json_each(pr.value_json,'$.ports') p WHERE pr.record_type='internetdb-host'"+(" AND "+passive_filter[7:] if passive_filter else "")+") GROUP BY port ORDER BY hosts DESC,port LIMIT 50"
+    port_facets=[dict(r) for r in db.execute(port_query,params+params)]
+    country_facets=[dict(r) for r in db.execute("SELECT h.country,COUNT(DISTINCT h.ip) hosts FROM hosts h"+where+" AND h.country!='' GROUP BY h.country ORDER BY hosts DESC LIMIT 50" if where else "SELECT h.country,COUNT(DISTINCT h.ip) hosts FROM hosts h WHERE h.country!='' GROUP BY h.country ORDER BY hosts DESC LIMIT 50",params)]
+    product_facets=[dict(r) for r in db.execute("SELECT s.product,COUNT(DISTINCT s.host_ip) hosts FROM services s JOIN hosts h ON h.ip=s.host_ip"+where+" AND s.product!='' GROUP BY s.product ORDER BY hosts DESC LIMIT 50" if where else "SELECT s.product,COUNT(DISTINCT s.host_ip) hosts FROM services s JOIN hosts h ON h.ip=s.host_ip WHERE s.product!='' GROUP BY s.product ORDER BY hosts DESC LIMIT 50",params)]
+    return {"hosts":rows,"page":page,"per_page":per_page,"total":total,"total_pages":total_pages,"has_next":page<total_pages,"has_previous":page>1,"range_start":start,"range_end":end,"facets":{"ports":port_facets,"countries":country_facets,"products":product_facets}}
 
 
 def asn_intelligence(db: sqlite3.Connection, asn: str, prefix_page: int = 1, metadata_page: int = 1) -> dict[str, Any]:

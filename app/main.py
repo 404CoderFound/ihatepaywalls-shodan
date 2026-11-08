@@ -10,13 +10,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.datastructures import Headers
-from .database import connection, init_db, utc_now
+from .database import connection, init_db, upsert_host_identity, utc_now
 from .search import QueryError, parse_query
 from .host_search import asn_intelligence, search_hosts
 from .passive import APPROVED_RDAP_BASES, provider_status, search_cached
 from .enrichment import enrichment_target, ensure_enrichment, queue_job, recover_pending, run_due_schedules_once, start_schedule_runner
 from .rate_limit import FixedWindowLimiter
-from .intelligence import router as intelligence_router
+from .intelligence import MAX_IMPORT_BYTES, MAX_IMPORT_CHUNK, router as intelligence_router
+from .monitoring import create_event, start_scheduler as start_monitoring_scheduler
 
 ROOT=Path(__file__).resolve().parent
 ADMIN_TOKEN=os.getenv("ADMIN_TOKEN",""); ENROLLMENT_TOKEN=os.getenv("ENROLLMENT_TOKEN","")
@@ -29,13 +30,14 @@ ENRICHMENT_ENABLED=os.getenv("PASSIVE_ENRICHMENT_ENABLED","true").lower()=="true
 MAX_ENRICHMENT_QUEUE=int(os.getenv("MAX_ENRICHMENT_QUEUE","100"))
 MAX_CAMPAIGN_TARGETS=int(os.getenv("MAX_CAMPAIGN_TARGETS","65536"));MAX_BATCH_TARGETS=int(os.getenv("MAX_BATCH_TARGETS","256"))
 RATE_LIMITER=FixedWindowLimiter()
-app=FastAPI(title="ScanLattice API",version="0.4.0",docs_url=None,redoc_url=None)
+app=FastAPI(title="ScanLattice API",version="1.0.0",docs_url=None,redoc_url=None)
 app.include_router(intelligence_router)
 app.mount("/static",StaticFiles(directory=ROOT/"static"),name="static")
 
 @app.middleware("http")
 async def bounded(request:Request,call_next):
-    if int(request.headers.get("content-length","0"))>int(os.getenv("MAX_BODY_BYTES",str(2*1024*1024))):
+    body_limit=int(os.getenv("MAX_IMPORT_CHUNK_BYTES",str(8*1024*1024))) if request.url.path=="/api/admin/datasets/imports" else int(os.getenv("MAX_BODY_BYTES",str(2*1024*1024)))
+    if int(request.headers.get("content-length","0"))>body_limit:
         return JSONResponse({"detail":"Request body too large"},413)
     identity=request.client.host if request.client else "unknown"
     request.state.api_scopes=[]
@@ -99,35 +101,36 @@ def audit(db,action:str,details:dict,actor="admin"):
 def startup():
     init_db(SEED_DEMO)
     if ENRICHMENT_ENABLED:recover_pending();start_schedule_runner()
+    from .vulnerability_feeds import start_scheduled_refresh
+    start_scheduled_refresh()
+    start_monitoring_scheduler()
 @app.get("/")
 def home():return FileResponse(ROOT/"static"/"index.html")
 @app.get("/api/health")
-def health():return {"status":"ok","role":"control-plane","active_scanning":False,"passive_enrichment":ENRICHMENT_ENABLED,"host_page_size":10,"version":"0.4.0"}
+def health():return {"status":"ok","role":"control-plane","active_scanning":False,"passive_enrichment":ENRICHMENT_ENABLED,"host_page_size":10,"version":"1.0.0"}
 @app.get("/api/stats")
 def stats():
     with connection() as db:return {"observations":db.execute("SELECT COUNT(*) FROM observations").fetchone()[0],"services":db.execute("SELECT COUNT(*) FROM services").fetchone()[0],"hosts":db.execute("SELECT COUNT(*) FROM (SELECT ip FROM hosts UNION SELECT ip FROM passive_records WHERE ip!='')").fetchone()[0],"passive_records":db.execute("SELECT COUNT(*) FROM passive_records").fetchone()[0],"workers_online":db.execute("SELECT COUNT(*) FROM workers WHERE last_seen>?",(int(time.time())-OFFLINE,)).fetchone()[0],"demo_enabled":SEED_DEMO}
 
 @app.get("/api/search")
-def search(q:str=Query("",max_length=500),page:int=Query(1,ge=1),prefix_page:int=Query(1,ge=1),metadata_page:int=Query(1,ge=1),limit:int|None=Query(None,include_in_schema=False)):
+def search(q:str=Query("",max_length=500),page:int=Query(1,ge=1),prefix_page:int=Query(1,ge=1),metadata_page:int=Query(1,ge=1),limit:int=Query(10,ge=1,le=100),sort:str=Query("last_seen",pattern="^(last_seen|first_seen|ip)$")):
     try: parsed=parse_query(q)
     except QueryError as exc:raise HTTPException(400,str(exc)) from exc
     should_queue=False;enrichment_job=None
     with connection() as db:
-        host_page=search_hosts(db,parsed,page)
+        host_page=search_hosts(db,parsed,page,sort,limit)
         passive=search_cached(db,parsed)
         enrichment_job,should_queue=ensure_enrichment(db,parsed,ENRICHMENT_ENABLED,MAX_ENRICHMENT_QUEUE)
         enrichment=provider_status(db)
         asn_values=parsed.filters.get("asn",[])
         asn_result=asn_intelligence(db,asn_values[0],prefix_page,metadata_page) if len(asn_values)==1 else None
     if should_queue and enrichment_job:queue_job(enrichment_job["id"])
-    facets={"ports":{},"countries":{},"products":{}}
-    for host_row in host_page["hosts"]:
-        country=host_row["country"] or "Unknown";facets["countries"][country]=facets["countries"].get(country,0)+1
-        for service_row in host_row["services"]:
-            port=str(service_row["port"]);product=service_row["product"] or "Unknown";facets["ports"][port]=facets["ports"].get(port,0)+1;facets["products"][product]=facets["products"].get(product,0)+1
+    facets={"ports":{str(row["port"]):row["hosts"] for row in host_page["facets"]["ports"]},
+            "countries":{row["country"]:row["hosts"] for row in host_page["facets"]["countries"]},
+            "products":{row["product"]:row["hosts"] for row in host_page["facets"]["products"]}}
     passive_total=len(passive);metadata_per_page=25;metadata_start=(metadata_page-1)*metadata_per_page
     passive_page=[] if asn_result else passive[metadata_start:metadata_start+metadata_per_page]
-    return {"query":q,**{key:host_page[key] for key in ("page","per_page","total","total_pages","has_next","has_previous","range_start","range_end")},"pages":host_page["total_pages"],"results":host_page["hosts"],"hosts":host_page["hosts"],"indexed_observations":host_page["hosts"],"passive_total":passive_total,"passive_intelligence":passive_page,"passive_pagination":{"page":metadata_page,"per_page":metadata_per_page,"total":passive_total,"total_pages":math.ceil(passive_total/metadata_per_page) if passive_total else 0,"has_next":metadata_start+metadata_per_page<passive_total},"asn_intelligence":asn_result,"has_information":bool(host_page["total"] or passive or asn_result),"message":None if host_page["total"] or passive or asn_result else "No indexed or passive information available.","enrichment":dict(enrichment_job) if enrichment_job else enrichment,"facets":facets}
+    return {"query":q,"sort":sort,**{key:host_page[key] for key in ("page","per_page","total","total_pages","has_next","has_previous","range_start","range_end")},"pages":host_page["total_pages"],"results":host_page["hosts"],"hosts":host_page["hosts"],"indexed_observations":host_page["hosts"],"passive_total":passive_total,"passive_intelligence":passive_page,"passive_pagination":{"page":metadata_page,"per_page":metadata_per_page,"total":passive_total,"total_pages":math.ceil(passive_total/metadata_per_page) if passive_total else 0,"has_next":metadata_start+metadata_per_page<passive_total},"asn_intelligence":asn_result,"has_information":bool(host_page["total"] or passive or asn_result),"message":None if host_page["total"] or passive or asn_result else "No indexed or passive information available.","enrichment":dict(enrichment_job) if enrichment_job else enrichment,"facets":facets}
 
 @app.get("/api/enrichment/{job_id}")
 def enrichment_status(job_id:str):
@@ -140,15 +143,32 @@ def host(ip:str):
     try:ipaddress.ip_address(ip)
     except ValueError as exc:raise HTTPException(400,"Invalid IP") from exc
     with connection() as db:
-        h=db.execute("SELECT * FROM hosts WHERE ip=?",(ip,)).fetchone(); rows=[dict(r) for r in db.execute("SELECT * FROM observations WHERE ip=? ORDER BY seen_at DESC,port",(ip,))];passive=[dict(r) for r in db.execute("SELECT * FROM passive_records WHERE ip=? ORDER BY observed_at DESC",(ip,))]
+        h=db.execute("SELECT * FROM hosts WHERE ip=?",(ip,)).fetchone(); rows=[dict(r) for r in db.execute("SELECT * FROM observations WHERE ip=? ORDER BY seen_at DESC,port",(ip,))];passive=[dict(r) for r in db.execute("SELECT * FROM passive_records WHERE ip=? ORDER BY observed_at DESC",(ip,))];matches=[dict(r) for r in db.execute("SELECT cve,confidence,evidence_json,source,observed_at FROM host_vulnerability_matches WHERE host_ip=? ORDER BY observed_at DESC",(ip,))]
     for row in passive:row["value"]=json.loads(row.pop("value_json"))
-    if not rows and not passive:raise HTTPException(404,"No indexed or passive information available")
+    if not rows and not passive and not h:raise HTTPException(404,"No indexed or passive information available")
+    for row in rows:
+        row["http"]=json.loads(row.pop("http_json") or "{}")
+        row["tls"]=json.loads(row.pop("tls_json") or "{}")
+    for row in matches:row["evidence"]=json.loads(row.pop("evidence_json"))
     latest={}
     for r in rows:latest.setdefault((r["port"],r["proto"]),r)
-    return {"host":dict(h) if h else {"ip":ip,"last_scan_at":""},"services":rows,"latest_by_port":list(latest.values()),"passive_intelligence":passive}
+    return {"host":dict(h) if h else {"ip":ip,"last_scan_at":""},"services":rows,"latest_by_port":list(latest.values()),"passive_intelligence":passive,"potential_vulnerabilities":matches}
 
 @app.get("/api/docs")
-def docs():return {"version":"0.4.0","authentication":{"public":"none","admin_browser":"HttpOnly session cookie plus X-CSRF-Token for mutations","admin_api":"X-Admin-Token","worker":"X-Worker-Token"},"pagination":{"hosts_per_page":10,"prefixes_per_page":25,"metadata_per_page":25},"search_examples":["port:443","asn:30925","asn:AS30925","country:NL",'org:"Example Organization"',"domain:example.org","service:ssh","net:192.0.2.0/24"],"endpoints":["GET /api/search","GET /api/enrichment/{id}","GET /api/hosts/{ip}","GET /api/stats","POST /api/admin/session","POST /api/admin/deep-recon/preview","POST /api/admin/deep-recon/launch","POST /api/admin/datasets/ingest","POST /api/admin/indexing/schedules","POST /api/admin/jobs","POST /api/admin/import","POST /api/admin/passive/import"]}
+def docs():return {
+    "version":"1.0.0",
+    "authentication":{"public":"No credentials required for public search and catalog reads","admin_browser":"HttpOnly SameSite=Strict session cookie; X-CSRF-Token on mutations","admin_api":"X-Admin-Token","read_api_key":"Authorization: Bearer <key> or X-API-Key; scoped read-only","worker":"X-Worker-Token"},
+    "rate_limits":{"public":"PUBLIC_RATE_LIMIT requests per client per fixed minute window (default 60)","login":"LOGIN_RATE_LIMIT attempts per client per fixed minute window (default 5)"},
+    "search":{"syntax":["port:443","asn:AS30925","country:NL",'org:"Example Organization"',"domain:example.org","hostname:edge.example.org","net:192.0.2.0/24","service:ssh","product:OpenSSH","os:Linux","http.title:admin","http.headers:server","ssl.cert.subject.cn:example.org","ssl.cert.issuer.cn:Example CA","cpe:cpe:2.3:a:vendor:product:1.2:*:*:*:*:*:*:*","vuln:CVE-2024-0001","after:2025-01-01","before:2025-12-31","port:22 OR port:443","port:22 -country:US"],"pagination":"GET /api/search accepts page, limit (1..100), sort (last_seen, first_seen, ip); result includes total and facets"},
+    "provenance":"Indexed observations and passive intelligence are separate. Each record retains source and observation time; passive port metadata is never exposed as a service banner.",
+    "endpoints":{
+        "public_read":["GET /api/search","GET /api/hosts/{ip}","GET /api/hosts/{ip}/observations","GET /api/domains/{domain}","GET /api/stats","GET /api/enrichment/{id}","GET /api/analytics/summary","GET /api/reports/export.csv","GET /api/vulnerabilities","GET /api/vulnerabilities/stats","GET /api/vulnerabilities/{cve}"],
+        "admin_session":["POST /api/admin/session","GET /api/admin/session","POST /api/admin/session/logout"],
+        "admin_control":["GET/POST /api/admin/authorizations","GET/POST /api/admin/jobs","POST /api/admin/jobs/{id}/cancel","GET /api/admin/workers","POST /api/admin/passive/providers","PUT /api/admin/passive/providers/{id}","POST /api/admin/datasets/imports (Content-Range chunk upload)","POST /api/admin/datasets/imports/{id}/resume","POST /api/admin/vulnerabilities/refresh","GET /api/admin/vulnerabilities/providers","GET/POST /api/admin/monitor/targets","GET/POST /api/admin/monitor/destinations","GET /api/admin/monitor/events","GET /api/admin/monitor/notifications","POST /api/admin/monitor/notifications/{id}/retry","POST /api/admin/monitor/events/{id}/acknowledge","GET/POST /api/admin/api-keys","GET/POST /api/admin/saved-searches"],
+        "worker":["POST /api/worker/register","POST /api/worker/heartbeat","GET /api/worker/jobs/next","POST /api/worker/jobs/{id}/results"]
+    },
+    "dataset_import":{"formats":["CSV","JSON array or object","JSONL"],"encoding":["identity","gzip"],"maximum_bytes":MAX_IMPORT_BYTES,"maximum_chunk_bytes":MAX_IMPORT_CHUNK,"resume":"Reuse the import id and continue at the returned byte offset; failed parsing can be retried with POST /api/admin/datasets/imports/{id}/resume"}
+}
 
 class SessionLogin(BaseModel):
     admin_token:str=Field(min_length=1,max_length=500)
@@ -241,9 +261,9 @@ def progress(jid:str,p:LeaseAction,x_worker_token:Annotated[str|None,Header()]=N
     return {"status":"ok"}
 
 class Observation(BaseModel):
-    ip:str;port:int=Field(ge=1,le=65535);proto:str=Field(default="tcp",pattern="^(tcp|udp)$");hostname:str=Field(default="",max_length=253);asn:str=Field(default="",max_length=40);org:str=Field(default="",max_length=160);country:str=Field(default="",max_length=8);service:str=Field(default="",max_length=80);product:str=Field(default="",max_length=160);banner:str=Field(default="",max_length=8192);source:str=Field(default="manual",max_length=200);http:dict[str,Any]=Field(default_factory=dict);tls:dict[str,Any]=Field(default_factory=dict);ssh_id:str=Field(default="",max_length=500);latency_ms:float|None=Field(default=None,ge=0,le=120000)
+    ip:str;port:int=Field(ge=1,le=65535);proto:str=Field(default="tcp",pattern="^(tcp|udp)$");hostname:str=Field(default="",max_length=253);asn:str=Field(default="",max_length=40);org:str=Field(default="",max_length=160);country:str=Field(default="",max_length=8);service:str=Field(default="",max_length=80);product:str=Field(default="",max_length=160);banner:str=Field(default="",max_length=8192);source:str=Field(default="manual",max_length=200);http:dict[str,Any]=Field(default_factory=dict);tls:dict[str,Any]=Field(default_factory=dict);ssh_id:str=Field(default="",max_length=500);latency_ms:float|None=Field(default=None,ge=0,le=120000);observed_at:str=Field(default="",max_length=64);cpe:str=Field(default="",max_length=500);os_name:str=Field(default="",max_length=160)
 class Results(BaseModel):
-    lease_token:str;idempotency_key:str=Field(min_length=8,max_length=200);observations:list[Observation]=Field(default_factory=list,max_length=10000)
+    lease_token:str;idempotency_key:str=Field(min_length=8,max_length=200);observations:list[Observation]=Field(default_factory=list,max_length=10000);completed_checks:int|None=Field(default=None,ge=0)
 
 class PassiveRecord(BaseModel):
     subject:str=Field(min_length=1,max_length=500)
@@ -278,7 +298,7 @@ class ScheduleCreate(BaseModel):
 
 class ProviderCreate(BaseModel):
     name:str=Field(min_length=2,max_length=100)
-    provider_type:str=Field(pattern="^(import|ripestat|rdap|passive_dns|certificate_transparency)$")
+    provider_type:str=Field(pattern="^(import|ripestat|rdap|passive_dns|certificate_transparency|shodan_internetdb)$")
     enabled:bool=False
     config:dict[str,Any]=Field(default_factory=dict)
     requests_per_minute:int=Field(default=10,ge=1,le=120)
@@ -309,20 +329,32 @@ def store(db,rows:list[Observation],source:str,jid=None,wid=None):
             except ValueError:continue
         if matches:
             _,mapping,network=max(matches,key=lambda item:item[0]);network_prefix=str(network);asn=asn or mapping["asn"];org=org or mapping["organization"]
-        previous=db.execute("SELECT service,product FROM services WHERE host_ip=? AND port=? AND proto=?",(r.ip,r.port,r.proto)).fetchone()
-        fingerprint=hashlib.sha256(json.dumps([r.ip,r.port,r.proto,r.service,r.product,r.banner,source,now],separators=(",",":"),sort_keys=True).encode()).hexdigest()
-        observation=db.execute("INSERT INTO observations(ip,port,proto,hostname,asn,org,country,service,product,banner,source,seen_at,http_json,tls_json,ssh_id,latency_ms,scan_job_id,worker_id,observation_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(r.ip,r.port,r.proto,r.hostname,asn,org,r.country.upper(),r.service,r.product,r.banner,source,now,json.dumps(r.http),json.dumps(r.tls),r.ssh_id,r.latency_ms,jid,wid,fingerprint))
-        db.execute("INSERT INTO hosts(ip,hostname,asn,org,country,first_seen,last_seen,last_scan_at,network_prefix,source,ip_version,ip_hex) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(ip) DO UPDATE SET hostname=CASE WHEN excluded.hostname!='' THEN excluded.hostname ELSE hosts.hostname END,asn=CASE WHEN excluded.asn!='' THEN excluded.asn ELSE hosts.asn END,org=CASE WHEN excluded.org!='' THEN excluded.org ELSE hosts.org END,country=CASE WHEN excluded.country!='' THEN excluded.country ELSE hosts.country END,last_seen=excluded.last_seen,last_scan_at=CASE WHEN excluded.last_scan_at!='' THEN excluded.last_scan_at ELSE hosts.last_scan_at END,network_prefix=CASE WHEN excluded.network_prefix!='' THEN excluded.network_prefix ELSE hosts.network_prefix END,source=excluded.source",(r.ip,r.hostname,asn,org,r.country.upper(),now,now,now if jid else "",network_prefix,source,address.version,f"{int(address):032x}"))
-        db.execute("INSERT INTO services(host_ip,port,proto,service,product,first_seen,last_seen,last_observation_id,source,banner,http_json,tls_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(host_ip,port,proto) DO UPDATE SET service=excluded.service,product=excluded.product,last_seen=excluded.last_seen,last_observation_id=excluded.last_observation_id,source=excluded.source,banner=excluded.banner,http_json=excluded.http_json,tls_json=excluded.tls_json",(r.ip,r.port,r.proto,r.service,r.product,now,now,observation.lastrowid,source,r.banner,json.dumps(r.http),json.dumps(r.tls)))
-        if not previous or (previous["product"] != r.product and r.product):
+        previous=db.execute("SELECT service,product,tls_json FROM services WHERE host_ip=? AND port=? AND proto=?",(r.ip,r.port,r.proto)).fetchone()
+        seen_at=r.observed_at or now
+        fingerprint=hashlib.sha256(json.dumps([r.ip,r.port,r.proto,r.service,r.product,r.banner,source,seen_at],separators=(",",":"),sort_keys=True).encode()).hexdigest()
+        observation=db.execute("INSERT INTO observations(ip,port,proto,hostname,asn,org,country,service,product,banner,source,seen_at,http_json,tls_json,ssh_id,latency_ms,scan_job_id,worker_id,observation_hash,cpe,os_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(r.ip,r.port,r.proto,r.hostname,asn,org,r.country.upper(),r.service,r.product,r.banner,source,seen_at,json.dumps(r.http),json.dumps(r.tls),r.ssh_id,r.latency_ms,jid,wid,fingerprint,r.cpe,r.os_name))
+        db.execute("INSERT INTO hosts(ip,hostname,asn,org,country,first_seen,last_seen,last_scan_at,network_prefix,source,ip_version,ip_hex,os_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(ip) DO UPDATE SET hostname=CASE WHEN excluded.hostname!='' THEN excluded.hostname ELSE hosts.hostname END,asn=CASE WHEN excluded.asn!='' THEN excluded.asn ELSE hosts.asn END,org=CASE WHEN excluded.org!='' THEN excluded.org ELSE hosts.org END,country=CASE WHEN excluded.country!='' THEN excluded.country ELSE hosts.country END,first_seen=MIN(hosts.first_seen,excluded.first_seen),last_seen=MAX(hosts.last_seen,excluded.last_seen),last_scan_at=CASE WHEN excluded.last_scan_at!='' AND excluded.last_scan_at>hosts.last_scan_at THEN excluded.last_scan_at ELSE hosts.last_scan_at END,network_prefix=CASE WHEN excluded.network_prefix!='' THEN excluded.network_prefix ELSE hosts.network_prefix END,source=excluded.source,os_name=CASE WHEN excluded.os_name!='' THEN excluded.os_name ELSE hosts.os_name END",(r.ip,r.hostname,asn,org,r.country.upper(),seen_at,seen_at,seen_at if jid else "",network_prefix,source,address.version,f"{int(address):032x}",r.os_name))
+        db.execute("INSERT INTO services(host_ip,port,proto,service,product,first_seen,last_seen,last_observation_id,source,banner,http_json,tls_json,cpe) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(host_ip,port,proto) DO UPDATE SET service=CASE WHEN excluded.last_seen>=services.last_seen THEN excluded.service ELSE services.service END,product=CASE WHEN excluded.last_seen>=services.last_seen THEN excluded.product ELSE services.product END,first_seen=MIN(services.first_seen,excluded.first_seen),last_seen=MAX(services.last_seen,excluded.last_seen),last_observation_id=CASE WHEN excluded.last_seen>=services.last_seen THEN excluded.last_observation_id ELSE services.last_observation_id END,source=CASE WHEN excluded.last_seen>=services.last_seen THEN excluded.source ELSE services.source END,banner=CASE WHEN excluded.last_seen>=services.last_seen THEN excluded.banner ELSE services.banner END,http_json=CASE WHEN excluded.last_seen>=services.last_seen THEN excluded.http_json ELSE services.http_json END,tls_json=CASE WHEN excluded.last_seen>=services.last_seen THEN excluded.tls_json ELSE services.tls_json END,cpe=CASE WHEN excluded.cpe!='' THEN excluded.cpe ELSE services.cpe END",(r.ip,r.port,r.proto,r.service,r.product,seen_at,seen_at,observation.lastrowid,source,r.banner,json.dumps(r.http),json.dumps(r.tls),r.cpe))
+        if not previous or (previous["product"] != r.product and r.product) or (previous["service"] != r.service and r.service):
             event_type="service_observed" if not previous else "software_changed"
-            details={"port":r.port,"protocol":r.proto,"service":r.service,"product":r.product,"previous_product":previous["product"] if previous else ""}
-            for monitor in db.execute("SELECT id,target FROM monitor_targets WHERE enabled=1"):
+            details={"port":r.port,"protocol":r.proto,"service":r.service,"product":r.product,"previous_product":previous["product"] if previous else "","previous_service":previous["service"] if previous else ""}
+            for monitor in db.execute("SELECT * FROM monitor_targets WHERE enabled=1"):
                 try:scope=ipaddress.ip_network(monitor["target"],strict=False)
                 except ValueError:continue
-                if address.version==scope.version and address in scope:
-                    exists=db.execute("SELECT 1 FROM monitor_events WHERE target_id=? AND ip=? AND event_type=? AND created_at>? AND details=?",(monitor["id"],r.ip,event_type,str(datetime.now(timezone.utc).date()),json.dumps(details,sort_keys=True))).fetchone()
-                    if not exists:db.execute("INSERT INTO monitor_events(target_id,ip,event_type,details,source,created_at) VALUES(?,?,?,?,?,?)",(monitor["id"],r.ip,event_type,json.dumps(details,sort_keys=True),source,now))
+                if address.version==scope.version and address in scope:create_event(db,monitor,r.ip,event_type,details,source,seen_at)
+        if previous:
+            try:
+                old_tls=json.loads(previous["tls_json"] or "{}");new_tls=r.tls
+                def fingerprint(value):
+                    cert=value.get("cert",value) if isinstance(value,dict) else {}
+                    return cert.get("fingerprint_sha256") or cert.get("sha256_fingerprint") or cert.get("fingerprint") or ""
+                old_fp,new_fp=fingerprint(old_tls),fingerprint(new_tls)
+                if old_fp and new_fp and old_fp!=new_fp:
+                    for monitor in db.execute("SELECT * FROM monitor_targets WHERE enabled=1"):
+                        try:scope=ipaddress.ip_network(monitor["target"],strict=False)
+                        except ValueError:continue
+                        if address.version==scope.version and address in scope:create_event(db,monitor,r.ip,"certificate_changed",{"port":r.port,"protocol":r.proto,"previous_fingerprint":old_fp,"fingerprint":new_fp},source,seen_at)
+            except (ValueError,AttributeError):pass
         if r.hostname:db.execute("INSERT INTO hostnames(ip,hostname,source,first_seen,last_seen) VALUES(?,?,?,?,?) ON CONFLICT(ip,hostname,source) DO UPDATE SET last_seen=excluded.last_seen",(r.ip,r.hostname.lower(),source,now,now))
     return len(rows)
 
@@ -335,7 +367,19 @@ def results(jid:str,p:Results,x_worker_token:Annotated[str|None,Header()]=None):
         if not auth:raise HTTPException(409,"Target authorization was revoked")
         target=ipaddress.ip_network(j["target"]);allowed=ipaddress.ip_network(auth[0]);ports=json.loads(j["ports"])
         if any(ipaddress.ip_address(r.ip) not in target or ipaddress.ip_address(r.ip) not in allowed or r.port not in ports for r in p.observations):raise HTTPException(400,"Result outside authorized job scope")
-        count=store(db,p.observations,"active-scan",jid,w["id"]);db.execute("INSERT INTO result_uploads VALUES(?,?,?,?,?)",(p.idempotency_key,jid,w["id"],utc_now(),count));db.execute("UPDATE scan_jobs SET status='completed',progress_done=progress_total,completed_at=?,updated_at=?,lease_expires_at=NULL WHERE id=?",(utc_now(),utc_now(),jid));db.execute("UPDATE workers SET completed_jobs=completed_jobs+1 WHERE id=?",(w["id"],))
+        count=store(db,p.observations,"active-scan",jid,w["id"])
+        if p.completed_checks is not None and p.completed_checks==j["progress_total"]:
+            start=f"{int(target.network_address):032x}";end=f"{int(target.broadcast_address):032x}"
+            placeholders=",".join("?" for _ in ports)
+            prior_services=db.execute(f"SELECT s.host_ip,s.port,s.proto,s.service,s.product,s.last_seen FROM services s JOIN hosts h ON h.ip=s.host_ip WHERE h.ip_version=? AND h.ip_hex BETWEEN ? AND ? AND s.port IN ({placeholders})",[target.version,start,end,*ports]).fetchall()
+            seen={(row.ip,row.port,row.proto) for row in p.observations}
+            monitors=[dict(row) for row in db.execute("SELECT * FROM monitor_targets WHERE enabled=1")]
+            for service in prior_services:
+                if (service["host_ip"],service["port"],service["proto"]) in seen:continue
+                details={"port":service["port"],"protocol":service["proto"],"service":service["service"],"product":service["product"],"last_observed_at":service["last_seen"],"scan_job_id":jid}
+                for monitor in monitors:
+                    if service["port"] in ports and ipaddress.ip_address(service["host_ip"]) in ipaddress.ip_network(monitor["target"],strict=False):create_event(db,monitor,service["host_ip"],"service_disappeared",details,"active-scan",utc_now())
+        db.execute("INSERT INTO result_uploads VALUES(?,?,?,?,?)",(p.idempotency_key,jid,w["id"],utc_now(),count));db.execute("UPDATE scan_jobs SET status='completed',progress_done=progress_total,completed_at=?,updated_at=?,lease_expires_at=NULL WHERE id=?",(utc_now(),utc_now(),jid));db.execute("UPDATE workers SET completed_jobs=completed_jobs+1 WHERE id=?",(w["id"],))
     return {"status":"completed","indexed":count}
 @app.post("/api/worker/jobs/{jid}/fail")
 def fail(jid:str,p:LeaseAction,x_worker_token:Annotated[str|None,Header()]=None):
@@ -381,6 +425,10 @@ def import_passive(p:PassiveImport,x_admin_token:Annotated[str|None,Header()]=No
                     if address.version!=network.version or address not in network:continue
                     current=ipaddress.ip_network(host["network_prefix"],strict=False) if host["network_prefix"] else None
                     if current is None or network.prefixlen>=current.prefixlen:db.execute("UPDATE hosts SET asn=?,org=CASE WHEN ?!='' THEN ? ELSE org END,network_prefix=? WHERE ip=?",(asn,row.org,row.org,str(network),host["ip"]))
+            if row.ip:
+                value=row.value if isinstance(row.value,dict) else {}
+                hostname=row.domain or str(value.get("hostname") or value.get("domain") or "")
+                upsert_host_identity(db,row.ip,row.source,row.observed_at,hostname,row.asn,row.org,str(value.get("country_code") or "").upper())
         audit(db,"passive.imported",{"count":len(p.records),"sources":sorted({r.source for r in p.records})})
     return {"imported":len(p.records)}
 
@@ -431,6 +479,7 @@ def create_provider(p:ProviderCreate,x_admin_token:Annotated[str|None,Header()]=
     admin(x_admin_token)
     if any(any(word in key.lower() for word in ("secret","token","password","api_key")) for key in p.config):raise HTTPException(400,"Store provider secrets in environment variables, not provider configuration")
     if p.provider_type=="rdap" and p.config.get("base_url","https://rdap.org/ip/") not in APPROVED_RDAP_BASES:raise HTTPException(400,"RDAP base URL is not on the approved provider allowlist")
+    if p.provider_type=="shodan_internetdb" and p.enabled and os.getenv("SHODAN_INTERNETDB_NONCOMMERCIAL_CONSENT","false").lower() not in {"1","true","yes"}:raise HTTPException(403,"Enable SHODAN_INTERNETDB_NONCOMMERCIAL_CONSENT only after confirming applicable Shodan terms or a commercial license")
     now=utc_now()
     with connection() as db:
         try:cursor=db.execute("INSERT INTO passive_providers(name,provider_type,enabled,config_json,requests_per_minute,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",(p.name,p.provider_type,int(p.enabled),json.dumps(p.config),p.requests_per_minute,now,now))
@@ -442,7 +491,9 @@ def create_provider(p:ProviderCreate,x_admin_token:Annotated[str|None,Header()]=
 def update_provider(provider_id:int,p:ProviderUpdate,x_admin_token:Annotated[str|None,Header()]=None):
     admin(x_admin_token)
     with connection() as db:
-        if db.execute("SELECT 1 FROM passive_providers WHERE id=?",(provider_id,)).fetchone() is None:raise HTTPException(404,"Provider not found")
+        row=db.execute("SELECT provider_type FROM passive_providers WHERE id=?",(provider_id,)).fetchone()
+        if row is None:raise HTTPException(404,"Provider not found")
+        if row["provider_type"]=="shodan_internetdb" and p.enabled and os.getenv("SHODAN_INTERNETDB_NONCOMMERCIAL_CONSENT","false").lower() not in {"1","true","yes"}:raise HTTPException(403,"Enable SHODAN_INTERNETDB_NONCOMMERCIAL_CONSENT only after confirming applicable Shodan terms or a commercial license")
         db.execute("UPDATE passive_providers SET enabled=?,requests_per_minute=?,updated_at=? WHERE id=?",(int(p.enabled),p.requests_per_minute,utc_now(),provider_id));audit(db,"passive.provider_updated",{"provider_id":provider_id,"enabled":p.enabled,"requests_per_minute":p.requests_per_minute})
     return {"id":provider_id,"enabled":p.enabled,"requests_per_minute":p.requests_per_minute}
 

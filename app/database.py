@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import ipaddress
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -11,6 +12,32 @@ DB_PATH = Path(os.getenv("DATABASE_PATH", "/data/scanlattice.db"))
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def upsert_host_identity(db: sqlite3.Connection, ip: str, source: str, observed_at: str,
+                         hostname: str="", asn: str="", org: str="", country: str="") -> None:
+    """Index a passive/imported host identity without creating a service or scan observation."""
+    address=ipaddress.ip_address(ip);asn=(asn or "").upper();org=org or "";prefix="";best=None
+    if asn.removeprefix("AS").isdigit():asn=f"AS{int(asn.removeprefix('AS'))}"
+    for route in db.execute("SELECT prefix,asn,organization FROM routing_prefixes WHERE expires_at IS NULL OR expires_at>?",(int(datetime.now(timezone.utc).timestamp()),)):
+        try:
+            network=ipaddress.ip_network(route["prefix"],strict=False)
+            if address.version==network.version and address in network and (best is None or network.prefixlen>best[0]):best=(network.prefixlen,route,network)
+        except ValueError:continue
+    if best:
+        _,route,network=best;prefix=str(network);asn=asn or route["asn"];org=org or route["organization"]
+    normalized=observed_at or utc_now()
+    db.execute("""INSERT INTO hosts(ip,hostname,asn,org,country,first_seen,last_seen,last_scan_at,network_prefix,source,ip_version,ip_hex)
+      VALUES(?,?,?,?,?,?,?,'',?,?,?,?) ON CONFLICT(ip) DO UPDATE SET
+      hostname=CASE WHEN excluded.hostname!='' THEN excluded.hostname ELSE hosts.hostname END,
+      asn=CASE WHEN excluded.asn!='' THEN excluded.asn ELSE hosts.asn END,
+      org=CASE WHEN excluded.org!='' THEN excluded.org ELSE hosts.org END,
+      country=CASE WHEN excluded.country!='' THEN excluded.country ELSE hosts.country END,
+      first_seen=MIN(hosts.first_seen,excluded.first_seen),last_seen=MAX(hosts.last_seen,excluded.last_seen),
+      network_prefix=CASE WHEN excluded.network_prefix!='' THEN excluded.network_prefix ELSE hosts.network_prefix END,
+      source=excluded.source""",(ip,hostname,asn,org,country,normalized,normalized,prefix,source,address.version,f"{int(address):032x}"))
+    if hostname:
+        db.execute("INSERT INTO hostnames(ip,hostname,source,first_seen,last_seen) VALUES(?,?,?,?,?) ON CONFLICT(ip,hostname,source) DO UPDATE SET last_seen=MAX(hostnames.last_seen,excluded.last_seen)",(ip,hostname.lower().rstrip("."),source,normalized,normalized))
 
 
 @contextmanager
@@ -186,7 +213,23 @@ def init_db(seed_demo: bool = False) -> None:
         CREATE TABLE IF NOT EXISTS vulnerabilities (
           cve TEXT PRIMARY KEY, description TEXT NOT NULL DEFAULT '', cvss REAL,
           severity TEXT NOT NULL DEFAULT '', known_exploited INTEGER NOT NULL DEFAULT 0,
-          source TEXT NOT NULL, updated_at TEXT NOT NULL
+          source TEXT NOT NULL, updated_at TEXT NOT NULL, cpes_json TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE TABLE IF NOT EXISTS host_vulnerability_matches (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, host_ip TEXT NOT NULL, cve TEXT NOT NULL,
+          confidence TEXT NOT NULL, evidence_json TEXT NOT NULL, source TEXT NOT NULL,
+          observed_at TEXT NOT NULL, UNIQUE(host_ip,cve,evidence_json),
+          FOREIGN KEY(host_ip) REFERENCES hosts(ip), FOREIGN KEY(cve) REFERENCES vulnerabilities(cve)
+        );
+        CREATE INDEX IF NOT EXISTS idx_host_vuln_host ON host_vulnerability_matches(host_ip,cve);
+        CREATE TABLE IF NOT EXISTS intelligence_provider_state (
+          provider TEXT PRIMARY KEY, last_attempt_at TEXT NOT NULL, last_success_at TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL, records_updated INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS vulnerability_feed_cursors (
+          provider TEXT PRIMARY KEY, window_start TEXT NOT NULL, window_end TEXT NOT NULL,
+          next_index INTEGER NOT NULL DEFAULT 0, total_results INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS monitor_targets (
           id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, target TEXT NOT NULL,
@@ -199,9 +242,34 @@ def init_db(seed_demo: bool = False) -> None:
           created_at TEXT NOT NULL, acknowledged_at TEXT NOT NULL DEFAULT '',
           FOREIGN KEY(target_id) REFERENCES monitor_targets(id)
         );
+        CREATE TABLE IF NOT EXISTS monitor_destinations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, kind TEXT NOT NULL,
+          endpoint TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS monitor_notifications (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL,
+          destination_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'queued',
+          attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0,
+          delivered_at TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+          UNIQUE(event_id,destination_id), FOREIGN KEY(event_id) REFERENCES monitor_events(id),
+          FOREIGN KEY(destination_id) REFERENCES monitor_destinations(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_monitor_notifications_due ON monitor_notifications(status,next_attempt_at);
         CREATE TABLE IF NOT EXISTS saved_searches (
           id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, query TEXT NOT NULL,
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS dataset_import_runs (
+          id TEXT PRIMARY KEY, source TEXT NOT NULL, format TEXT NOT NULL,
+          encoding TEXT NOT NULL DEFAULT 'identity', total_bytes INTEGER NOT NULL,
+          uploaded_bytes INTEGER NOT NULL DEFAULT 0, records_processed INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', spool_path TEXT NOT NULL,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS dataset_import_records (
+          import_id TEXT NOT NULL, row_number INTEGER NOT NULL, observation_count INTEGER NOT NULL,
+          PRIMARY KEY(import_id,row_number),
+          FOREIGN KEY(import_id) REFERENCES dataset_import_runs(id)
         );
         """)
         _add_columns(db, "observations", {
@@ -226,6 +294,11 @@ def init_db(seed_demo: bool = False) -> None:
             "http_json": "TEXT NOT NULL DEFAULT '{}'", "tls_json": "TEXT NOT NULL DEFAULT '{}'"
         })
         _add_columns(db, "observations", {"observation_hash": "TEXT NOT NULL DEFAULT ''"})
+        _add_columns(db, "observations", {"cpe": "TEXT NOT NULL DEFAULT ''", "os_name": "TEXT NOT NULL DEFAULT ''"})
+        _add_columns(db, "services", {"cpe": "TEXT NOT NULL DEFAULT ''"})
+        _add_columns(db, "hosts", {"os_name": "TEXT NOT NULL DEFAULT ''"})
+        _add_columns(db, "vulnerabilities", {"cpes_json": "TEXT NOT NULL DEFAULT '[]'"})
+        _add_columns(db, "monitor_targets", {"alert_types_json": "TEXT NOT NULL DEFAULT '[\"service_observed\",\"software_changed\",\"service_disappeared\",\"certificate_expiring\",\"certificate_changed\",\"vulnerability_new\"]'", "cooldown_seconds": "INTEGER NOT NULL DEFAULT 900"})
         db.execute("CREATE INDEX IF NOT EXISTS idx_hosts_asn_last ON hosts(asn,last_seen DESC,ip_hex)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_hosts_ip_sort ON hosts(ip_version,ip_hex)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_hosts_prefix ON hosts(network_prefix)")
@@ -250,6 +323,7 @@ def init_db(seed_demo: bool = False) -> None:
             ("RIPEstat", "ripestat", 1, "{}", 10, now, now),
             ("RDAP Bootstrap", "rdap", 1, '{"base_url":"https://rdap.org/"}', 10, now, now),
             ("crt.sh Certificate Transparency", "certificate_transparency", 0, "{}", 5, now, now),
+            ("Shodan InternetDB", "shodan_internetdb", 0, "{}", 5, now, now),
         ]
         db.executemany("INSERT OR IGNORE INTO passive_providers(name,provider_type,enabled,config_json,requests_per_minute,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", provider_defaults)
         if seed_demo and db.execute("SELECT COUNT(*) FROM observations WHERE is_demo=1").fetchone()[0] == 0:

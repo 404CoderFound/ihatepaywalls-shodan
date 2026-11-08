@@ -1,8 +1,8 @@
-# ScanLattice v0.4
+# ScanLattice v1.0
 
-Open-source network intelligence index with a passive-only FastAPI control plane and separate outbound-connected scanning workers. The interface follows the compact, utilitarian search style of the mid-2010s without using Shodan code or assets.
+Open-source network intelligence index with a passive-only FastAPI control plane and separate authorized scanning workers. The interface follows the compact, utilitarian search style of the mid-2010s without using Shodan code or assets.
 
-Public visitors can search a normalized host/service index and trigger asynchronous, cached passive enrichment without authentication. Search pages contain exactly 10 hosts, while ASN prefixes and passive metadata use independent pagination. Exact ASN, IP, CIDR, domain, and hostname queries create a persistent, deduplicated enrichment job and the browser updates automatically. Administrative operations use an HttpOnly, Secure, SameSite=Strict session cookie plus a CSRF token, or the existing `X-Admin-Token` header for automation.
+Public visitors can search indexed observations and cached/passive intelligence without authentication. Public search may queue bounded enrichment through explicitly enabled passive providers, but it never launches an active scan or contacts a target application's services. Active jobs, worker management, dataset imports, provider configuration, monitoring management and vulnerability feed refresh require server-side administrator authorization. Browser administrators use an HttpOnly, SameSite=Strict session cookie plus a CSRF token; automation uses the `X-Admin-Token` header. The API key system is read-only and scope limited.
 
 ## Safety boundary
 
@@ -21,7 +21,7 @@ compose.worker.yaml  scanner role only
 .env.worker.example  scanner configuration template
 ```
 
-`worker-legacy/` remains beside this repository as the migration backup. It is not used by either v0.4 Compose file.
+`worker-legacy/` remains beside this repository as the migration backup. It is not used by the v1.0 Compose files.
 
 ## Local tests
 
@@ -142,19 +142,19 @@ Do not commit `.env`, `.env.worker`, SQLite files, `.venv`, caches, or worker re
 cd /opt/scanlattice
 git status --short
 git add app worker tests compose.web.yaml compose.worker.yaml Dockerfile requirements.txt README.md .env.example .env.worker.example .gitignore pytest.ini
-git commit -m "Implement ScanLattice v0.4 host indexing and ASN pagination"
+git commit -m "Implement ScanLattice v1.0 host indexing and ASN intelligence"
 git push origin main
 ```
 
 ## Current limitations
 
-SQLite and the persistent in-process enrichment/indexing executors are appropriate for v0.4 but should move behind PostgreSQL plus a dedicated queue before high-volume or multi-control-plane deployment. TLS collection currently records protocol, cipher, and SHA-256 certificate fingerprint rather than a complete parsed certificate chain. Certificate Transparency has an optional, administrator-enabled crt.sh adapter. Live passive DNS and commercial host-intelligence APIs are not bundled; permitted datasets can be ingested through the resumable dataset endpoint. Provider data is never converted into invented hosts or open services.
+SQLite and in-process enrichment/indexing executors are suitable for a single control-plane deployment, but should move behind PostgreSQL and a dedicated queue before high-volume or multi-control-plane operation. TLS observations retain the collected protocol, cipher, certificate fingerprint and available certificate metadata. Certificate Transparency and other passive providers must be explicitly enabled. Live passive DNS and commercial host-intelligence APIs are not bundled; permitted datasets can be ingested through the resumable dataset endpoint. Provider data is never converted into invented hosts or open services.
 
 ## v1.0 development additions
 
 This branch adds read-only API keys, stored DNS history lookup, an importable CVE catalog, CIDR-scoped monitoring targets and observation alert history, indexed analytics, CSV observation export, and browser navigation for these data-backed sections. Admin keys are returned once and stored as SHA-256 hashes. Public API reads share the configured public rate limit. Monitoring events are created from ingested observation changes; they do not schedule scans.
 
-The current development scope is not commercial global host-index parity. It does not automatically sync NVD/CISA feeds, ingest large streaming/GZIP datasets, provide interactive geo maps or screenshots, send alert notifications, or correlate CVEs against CPE evidence. See [FEATURE_CHECKLIST.md](FEATURE_CHECKLIST.md) for verified status and remaining work.
+The project provides an importable host index and configurable provider adapters; it does not claim commercial global host-index coverage. NVD and CISA KEV adapters, streaming dataset imports, potential CPE correlations, monitoring notifications and data-backed analytics are implemented. Interactive geographic maps and authorized screenshots remain incomplete. See [FEATURE_CHECKLIST.md](FEATURE_CHECKLIST.md) for verified status and remaining work.
 
 ### Python SDK and CLI
 
@@ -181,3 +181,13 @@ docker compose -p scanlattice-staging -f compose.staging.yaml up -d --build
 ```
 
 To test a database copy, make a verified backup first, place only the copy in `scanlattice_staging_data`, and set `DATABASE_PATH` to its copied filename. Do not attach `web_scanlattice_data` or `worker_worker_state` to staging. This checkout has not been supplied with a production database copy, so no restore has been run.
+
+### Resumable dataset ingestion
+
+Admin clients upload the file as consecutive raw chunks to `POST /api/admin/datasets/imports`. Required headers are `X-Import-Id`, `X-Import-Source`, `X-Import-Format` (`csv`, `json`, or `jsonl`), `X-Import-Encoding` (`identity` or `gzip`) and `Content-Range: bytes START-END/TOTAL`. The response includes `resume_offset`; retry from that exact offset after interruption. `GET /api/admin/datasets/imports` reports progress and `POST /api/admin/datasets/imports/{id}/resume` retries processing after an interrupted or partially processed upload. Chunks default to at most 8 MiB; compressed file size defaults to at most 20 GiB. Import files are spooled below the configured database directory and retained for resumability.
+
+The importer accepts service observations (including common Shodan-style `ip_str`, `data`, `transport`, `product`, `banner`, `ssl`, `http`, `asn`, and `hostnames` fields) and host-only rows. Host-only records create host identity/history metadata, but never a service or port. Every service row is stored with the supplied dataset provenance and timestamp. Search examples include `http.title:"Admin Portal"`, `ssl.cert.subject.cn:example.org`, `cpe:nginx`, `os:linux`, `after:2025-01-01`, `port:80 OR port:443`, and `-country:US`.
+
+### Vulnerability feeds
+
+`POST /api/admin/vulnerabilities/refresh` accepts `{"providers":["nvd","kev"],"max_pages":20}`. NVD uses its official CVE API and KEV uses CISA's published catalog. NVD modified-date pagination is resumable across bounded runs; set `NVD_API_KEY` to use the registered API quota. Optional daily refresh starts only when `VULNERABILITY_AUTO_REFRESH=true`. Current feed health and cursor are available at `GET /api/admin/vulnerabilities/providers`. Feed network calls were not made during local tests; provider parsers and paging were tested with fixtures.

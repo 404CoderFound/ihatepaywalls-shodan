@@ -32,9 +32,11 @@ async function checkSession() {
   try {
     const state = await api("/api/admin/session");
     $("admin-scan-action").classList.toggle("hidden", !state.authenticated);
+    if($("save-search-action"))$("save-search-action").classList.toggle("hidden", !state.authenticated);
     return state.authenticated;
   } catch (_) {
     $("admin-scan-action").classList.add("hidden");
+    if($("save-search-action"))$("save-search-action").classList.add("hidden");
     return false;
   }
 }
@@ -67,6 +69,7 @@ function submitSearch(value) {
 $("hero-search").addEventListener("submit", event => {event.preventDefault(); submitSearch($("hero-query").value);});
 $("top-search").addEventListener("submit", event => {event.preventDefault(); submitSearch($("header-query").value);});
 $("admin-scan-action").addEventListener("click", openDeepRecon);
+$("save-search-action").addEventListener("click", async()=>{try{const label=window.prompt("Name this saved search",activeQuery||"Saved search");if(!label)return;await api("/api/admin/saved-searches",{method:"POST",headers:adminHeaders(),body:JSON.stringify({name:label,query:activeQuery})});toast("Search saved to the administrator account");}catch(error){toast(error.message);}});
 
 async function loadStats() {
   try {
@@ -80,10 +83,11 @@ async function loadStats() {
 
 function passiveCard(row) {
   const subject = row.ip || row.domain || row.subject;
+  const timestampLabel = row.record_type === "internetdb-host" ? "Retrieved" : "Observed";
   return `<article class="observation passive-record">
     <h3>${row.ip ? `<a href="#host?ip=${encodeURIComponent(row.ip)}">${esc(subject)}</a>` : esc(subject)}</h3>
     <div class="org">${esc(row.org || row.asn || row.record_type)}</div>
-    <div class="meta">PASSIVE INTELLIGENCE · Source: ${esc(row.source)} · Observed: ${esc(row.observed_at)}</div>
+    <div class="meta">PASSIVE INTELLIGENCE · Source: ${esc(row.source)} · ${timestampLabel}: ${esc(row.observed_at)}</div>
     <div><span class="service">${esc(row.record_type)}</span>${row.network ? `<span class="service">${esc(row.network)}</span>` : ""}</div>
     <pre>${esc(JSON.stringify(row.value, null, 2))}</pre>
   </article>`;
@@ -213,9 +217,16 @@ async function loadHost(ip) {
   try {
     const data = await api(`/api/hosts/${encodeURIComponent(ip)}`);
     const host = data.host;
-    const observations = data.latest_by_port.map(row => `<article class="observation"><h3>${row.port}/${esc(row.proto)} — ${esc(row.product || row.service || "Unknown service")}</h3><div class="meta">HISTORICAL OBSERVATION · ${esc(row.seen_at)} · ${esc(row.source)}</div><pre>${esc(row.banner || "No banner collected")}</pre></article>`).join("");
+    const history = await api(`/api/hosts/${encodeURIComponent(ip)}/observations?page=1&limit=50`);
+    const observations = data.latest_by_port.map(row => `<article class="observation"><h3>${row.port}/${esc(row.proto)} — ${esc(row.product || row.service || "Unknown service")}</h3><div class="meta">HISTORICAL OBSERVATION · ${esc(row.seen_at)} · ${esc(row.source)}</div><pre>${esc(row.banner || "No banner collected")}</pre><details><summary>HTTP / TLS / CPE metadata</summary><pre>${esc(JSON.stringify({http:row.http,tls:row.tls,cpe:row.cpe,ssh_id:row.ssh_id},null,2))}</pre></details></article>`).join("");
+    const timeline = history.results.map(row=>`<div class="service-detail"><b>${row.port}/${esc(row.proto)} ${esc(row.product||row.service)}</b><span>${esc(row.banner)}</span><small>${esc(row.seen_at)} · ${esc(row.source)}</small></div>`).join("");
     const passive = data.passive_intelligence.map(passiveCard).join("");
-    $("host-content").innerHTML = `<div class="hostmeta"><div><small>HOSTNAME</small><strong>${esc(host.hostname || "Not available")}</strong></div><div><small>ORGANIZATION / ASN</small><strong>${esc(host.org || "Unknown")} / ${esc(host.asn || "Unknown")}</strong></div><div><small>COUNTRY</small><strong>${esc(host.country || "Unknown")}</strong></div><div><small>LAST ACTIVE SCAN</small><strong>${esc(host.last_scan_at || "No active scan recorded")}</strong></div></div>${observations ? `<h3>Indexed Observations</h3>${observations}` : ""}${passive ? `<h3>Passive Intelligence</h3>${passive}` : ""}`;
+    const potential=(data.potential_vulnerabilities||[]).map(v=>`<article class="observation"><h3>${esc(v.cve)} · Potential match</h3><div class="meta">Source: ${esc(v.source)} · Observed: ${esc(v.observed_at)}</div><pre>${esc(JSON.stringify(v.evidence,null,2))}</pre></article>`).join("");
+    let scanAction="";
+    if(await checkSession())scanAction='<button id="host-scan-now" type="button">SCAN NOW · AUTHORIZED SCOPE REQUIRED</button>';
+    $("host-content").innerHTML = `${scanAction}<div class="hostmeta"><div><small>HOSTNAME</small><strong>${esc(host.hostname || "Not available")}</strong></div><div><small>ORGANIZATION / ASN</small><strong>${esc(host.org || "Unknown")} / ${esc(host.asn || "Unknown")}</strong></div><div><small>COUNTRY</small><strong>${esc(host.country || "Unknown")}</strong></div><div><small>LAST ACTIVE SCAN</small><strong>${esc(host.last_scan_at || "No active scan recorded")}</strong></div><div><small>OS IDENTIFICATION</small><strong>${esc(host.os_name||"Not available")}</strong></div><div><small>NETWORK PREFIX</small><strong>${esc(host.network_prefix||"Not available")}</strong></div></div>${observations ? `<h3>Latest Indexed Service Observations</h3>${observations}` : ""}${timeline?`<h3>Observation History <span>${history.total} total</span></h3>${timeline}${history.total>history.per_page?`<p>Showing first ${history.per_page} newest observations.</p>`:""}`:""}${passive ? `<h3>Passive Intelligence</h3>${passive}` : ""}${potential?`<h3>Potential Vulnerability Correlations</h3>${potential}`:""}`;
+    const scanButton=$("host-scan-now");
+    if(scanButton)scanButton.onclick=async()=>{try{const profiles=await api("/api/admin/profiles",{headers:adminHeaders()});const profile=profiles.profiles.find(row=>row.name==="Quick Recon")||profiles.profiles[0];if(!profile)throw Error("No scan profile is configured");const bits=ip.includes(":")?128:32;await api("/api/admin/jobs",{method:"POST",headers:adminHeaders(),body:JSON.stringify({target:`${ip}/${bits}`,profile_id:profile.id})});toast("Authorized scan job queued. Execution occurs on an available registered worker.");}catch(error){toast(error.message);}};
   } catch (error) {
     $("host-content").innerHTML = `<div class="empty"><strong>${esc(error.message)}</strong></div>`;
   }
@@ -235,9 +246,10 @@ $("admin-login").addEventListener("click", async () => {
 async function loadAdmin() {
   try {
     const headers = adminHeaders();
-    const [workers,jobs,authorizations,profiles,stats] = await Promise.all([
+    const [workers,jobs,authorizations,profiles,stats,providers,imports] = await Promise.all([
       api("/api/admin/workers",{headers}), api("/api/admin/jobs",{headers}),
-      api("/api/admin/authorizations",{headers}), api("/api/admin/profiles",{headers}), api("/api/stats")
+      api("/api/admin/authorizations",{headers}), api("/api/admin/profiles",{headers}), api("/api/stats"),
+      api("/api/admin/passive/providers",{headers}),api("/api/admin/datasets/imports",{headers})
     ]);
     $("admin-content").classList.remove("hidden");
     $("workers-online").textContent = workers.workers.filter(row => row.online).length;
@@ -251,9 +263,31 @@ async function loadAdmin() {
     $("worker-table").innerHTML = workers.workers.map(row => `<tr><td>${esc(row.name)}<br><small>${row.id}</small></td><td class="${row.online ? "online" : "offline"}">${row.online ? "● Online" : "○ Offline"}</td><td>${row.cpu_pct.toFixed(1)}% / ${row.memory_pct.toFixed(1)}%</td><td>${row.running_jobs} / ${row.max_concurrent}</td><td>${row.completed_jobs}</td><td>${esc(row.version || "legacy")}<br><small>${esc(row.capabilities.join(", "))}</small></td><td>${new Date(row.last_seen*1000).toLocaleString()}</td></tr>`).join("") || '<tr><td colspan="7">No workers enrolled.</td></tr>';
     $("job-table").innerHTML = jobs.jobs.map(row => `<tr><td><small>${row.id}</small><br><b>${esc(row.target)}</b><br>${row.ports.join(", ")}</td><td>${esc(row.profile_name)}</td><td class="status-${row.status}">${esc(row.status.toUpperCase())}</td><td>${row.progress_done} / ${row.progress_total}</td><td>${esc(row.worker_name || "Unassigned")}</td><td>${esc(row.error || "")}${["queued","assigned","running"].includes(row.status) ? `<button class="tiny cancel-job" data-id="${row.id}">CANCEL</button>` : ""}</td></tr>`).join("") || '<tr><td colspan="6">No scan jobs.</td></tr>';
     document.querySelectorAll(".cancel-job").forEach(button => button.onclick = () => cancelJob(button.dataset.id));
+    $("provider-table").innerHTML=providers.providers.map(row=>`<tr><td>${esc(row.name)}</td><td>${esc(row.provider_type)}</td><td>${row.enabled?"Enabled":"Disabled"}</td><td>${row.requests_per_minute}</td><td><button class="provider-toggle" data-id="${row.id}" data-enabled="${row.enabled}">${row.enabled?"DISABLE":"ENABLE"}</button></td></tr>`).join("")||'<tr><td colspan="5">No passive providers.</td></tr>';
+    document.querySelectorAll(".provider-toggle").forEach(button=>button.onclick=async()=>{try{await api(`/api/admin/passive/providers/${button.dataset.id}`,{method:"PUT",headers:adminHeaders(),body:JSON.stringify({enabled:button.dataset.enabled!=="true",requests_per_minute:10})});await loadAdmin();}catch(error){toast(error.message);}});
+    $("dataset-table").innerHTML=imports.imports.map(row=>`<tr><td>${esc(row.id)}<br>${esc(row.source)}</td><td>${esc(row.format)} / ${esc(row.encoding)}</td><td>${row.uploaded_bytes.toLocaleString()} / ${row.total_bytes.toLocaleString()}</td><td>${row.records_processed.toLocaleString()}</td><td>${esc(row.status)} ${esc(row.error||"")}</td><td>${esc(row.updated_at)}</td></tr>`).join("")||'<tr><td colspan="6">No dataset imports yet.</td></tr>';
+    bindDatasetUpload();
   } catch (error) {
     $("admin-content").classList.add("hidden"); toast(error.message);
   }
+}
+
+function bindDatasetUpload(){
+  const form=$("dataset-form");if(!form||form.dataset.bound)return;form.dataset.bound="true";
+  form.addEventListener("submit",async event=>{
+    event.preventDefault();const file=$("dataset-file").files[0],source=$("dataset-source").value.trim();if(!file||!source)return;
+    const encoding=file.name.toLowerCase().endsWith(".gz")?"gzip":"identity",plainName=encoding==="gzip"?file.name.slice(0,-3):file.name,format=plainName.split(".").pop().toLowerCase();
+    if(!["csv","json","jsonl"].includes(format)){toast("Choose a .csv, .json, .jsonl or gzip-compressed equivalent.");return;}
+    const resumeKey=`scanlattice-import:${file.name}:${file.size}`,saved=sessionStorage.getItem(resumeKey);let state;
+    try{state=saved?JSON.parse(saved):null;}catch(_){state=null;}
+    if(!state||state.source!==source)state={id:crypto.randomUUID(),source};sessionStorage.setItem(resumeKey,JSON.stringify(state));
+    const chunkSize=1024*1024;let offset=0;
+    try{
+      const existing=await api("/api/admin/datasets/imports",{headers:adminHeaders()});const run=existing.imports.find(item=>item.id===state.id);
+      if(run)offset=run.uploaded_bytes;
+      for(;offset<file.size;){const end=Math.min(file.size,offset+chunkSize),chunk=file.slice(offset,end);const response=await fetch("/api/admin/datasets/imports",{method:"POST",credentials:"same-origin",headers:{"X-CSRF-Token":csrfToken,"X-Import-Id":state.id,"X-Import-Source":source,"X-Import-Format":format,"X-Import-Encoding":encoding,"Content-Range":`bytes ${offset}-${end-1}/${file.size}`,"Content-Type":"application/octet-stream"},body:chunk});const data=await response.json();if(!response.ok)throw Error(data.error||data.detail||"Import request failed");offset=data.resume_offset||data.uploaded_bytes||end;$("dataset-progress").textContent=`Import ${state.id}: ${offset.toLocaleString()} / ${file.size.toLocaleString()} bytes · ${data.status}`;if(data.status==="completed"){sessionStorage.removeItem(resumeKey);toast(`Imported ${data.records_processed} input records`);await loadAdmin();return;}}
+    }catch(error){$("dataset-progress").textContent=`${error.message} · resume id ${state.id}`;toast("Import paused; select the same file and provenance to resume.");}
+  });
 }
 
 $("auth-form").addEventListener("submit", async event => {

@@ -54,7 +54,7 @@ def execute(job,headers):
         pool.shutdown(wait=False,cancel_futures=True)
         raise
     else:pool.shutdown(wait=True)
-    return call(f"/api/worker/jobs/{job['id']}/results",{"lease_token":job["lease_token"],"idempotency_key":f"{job['id']}:{uuid.uuid4()}","observations":results},headers)
+    return call(f"/api/worker/jobs/{job['id']}/results",{"lease_token":job["lease_token"],"idempotency_key":f"{job['id']}:{uuid.uuid4()}","completed_checks":done,"observations":results},headers)
 def main():
     if not CONTROL.startswith("https://") and not (os.getenv("ALLOW_INSECURE_LOCALHOST")=="true" and CONTROL.startswith("http://127.0.0.1")):raise RuntimeError("CONTROL_URL must use HTTPS")
     backoff=5

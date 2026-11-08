@@ -42,7 +42,8 @@ def test_passive_only_host_is_publicly_searchable(system, admin_headers):
     record={"subject":"198.51.100.77","subject_type":"ip","ip":"198.51.100.77","asn":"AS64577","org":"Passive Example","network":"198.51.100.0/24","record_type":"rdap","value":{"name":"EXAMPLE-NET"},"source":"licensed-rdap-cache","observed_at":"2026-11-08T10:00:00+00:00"}
     assert client.post("/api/admin/passive/import",headers=admin_headers,json={"records":[record]}).status_code==200
     result=client.get("/api/search",params={"q":"ip:198.51.100.77"}).json()
-    assert result["total"]==0 and result["passive_total"]==1
+    assert result["total"]==1 and result["passive_total"]==1
+    assert result["hosts"][0]["ip"]=="198.51.100.77" and result["hosts"][0]["services"]==[]
     assert result["passive_intelligence"][0]["source"]=="licensed-rdap-cache"
     host=client.get("/api/hosts/198.51.100.77").json()
     assert host["services"]==[] and len(host["passive_intelligence"])==1
@@ -78,6 +79,7 @@ def test_approved_rdap_provider_is_cached_without_contacting_target(system,admin
         time.sleep(.01)
     second=client.get("/api/search",params={"q":"ip:203.0.113.9"}).json()
     assert second["passive_total"]==1 and calls==["https://rdap.org/ip/203.0.113.9"]
+    assert second["total"]==1 and second["hosts"][0]["services"]==[]
 
 
 def test_admin_session_can_create_authorized_job_with_csrf(system):
