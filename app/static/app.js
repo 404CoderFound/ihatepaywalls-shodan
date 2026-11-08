@@ -7,8 +7,8 @@ const esc = value => String(value ?? "").replace(/[&<>"']/g, char => (
 let activeQuery = "";
 let csrfToken = sessionStorage.getItem("scanlattice_csrf") || "";
 let enrichmentTimer = null;
-document.querySelector("#page-docs .sectionheader span").textContent = "VERSION 0.4";
-document.querySelector("footer .right").textContent = "CONTROL PLANE v0.4 / HOST INDEX + PASSIVE DISCOVERY";
+document.querySelector("#page-docs .sectionheader span").textContent = "VERSION 1.0";
+document.querySelector("footer .right").textContent = "CONTROL PLANE v1.0 / INDEXED + PASSIVE INTELLIGENCE";
 
 function toast(message) {
   const element = $("toast");
