@@ -28,6 +28,17 @@ def test_public_cannot_create_or_cancel_jobs(system, admin_headers):
     assert client.post(f"/api/admin/jobs/{job['id']}/cancel").status_code == 401
 
 
+def test_scan_now_authorization_check_is_admin_only_and_scope_specific(system, admin_headers):
+    client, _, _ = system
+    assert client.get("/api/admin/hosts/192.0.2.4/authorization").status_code == 401
+    authorize(client, admin_headers)
+    allowed=client.get("/api/admin/hosts/127.0.0.4/authorization",headers=admin_headers)
+    denied=client.get("/api/admin/hosts/203.0.113.4/authorization",headers=admin_headers)
+    assert allowed.status_code==200 and allowed.json()["authorized"] is True
+    assert allowed.json()["cidr"]=="127.0.0.0/24"
+    assert denied.status_code==200 and denied.json()["authorized"] is False
+
+
 def test_public_search_performs_no_outbound_probe(system, monkeypatch):
     client, _, _ = system
     def forbidden(*args, **kwargs):

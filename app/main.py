@@ -164,7 +164,7 @@ def docs():return {
     "endpoints":{
         "public_read":["GET /api/search","GET /api/hosts/{ip}","GET /api/hosts/{ip}/observations","GET /api/domains/{domain}","GET /api/stats","GET /api/enrichment/{id}","GET /api/analytics/summary","GET /api/reports/export.csv","GET /api/vulnerabilities","GET /api/vulnerabilities/stats","GET /api/vulnerabilities/{cve}"],
         "admin_session":["POST /api/admin/session","GET /api/admin/session","POST /api/admin/session/logout"],
-        "admin_control":["GET/POST /api/admin/authorizations","GET/POST /api/admin/jobs","POST /api/admin/jobs/{id}/cancel","GET /api/admin/workers","POST /api/admin/passive/providers","PUT /api/admin/passive/providers/{id}","POST /api/admin/datasets/imports (Content-Range chunk upload)","POST /api/admin/datasets/imports/{id}/resume","POST /api/admin/vulnerabilities/refresh","GET /api/admin/vulnerabilities/providers","GET/POST /api/admin/monitor/targets","GET/POST /api/admin/monitor/destinations","GET /api/admin/monitor/events","GET /api/admin/monitor/notifications","POST /api/admin/monitor/notifications/{id}/retry","POST /api/admin/monitor/events/{id}/acknowledge","GET/POST /api/admin/api-keys","GET/POST /api/admin/saved-searches"],
+        "admin_control":["GET/POST /api/admin/authorizations","GET /api/admin/hosts/{ip}/authorization","GET/POST /api/admin/jobs","POST /api/admin/jobs/{id}/cancel","GET /api/admin/workers","POST /api/admin/passive/providers","PUT /api/admin/passive/providers/{id}","POST /api/admin/datasets/imports (Content-Range chunk upload)","POST /api/admin/datasets/imports/{id}/resume","POST /api/admin/vulnerabilities/refresh","GET /api/admin/vulnerabilities/providers","GET/POST /api/admin/monitor/targets","GET/POST /api/admin/monitor/destinations","GET /api/admin/monitor/events","GET /api/admin/monitor/notifications","POST /api/admin/monitor/notifications/{id}/retry","POST /api/admin/monitor/events/{id}/acknowledge","GET/POST /api/admin/api-keys","GET/POST /api/admin/saved-searches"],
         "worker":["POST /api/worker/register","POST /api/worker/heartbeat","GET /api/worker/jobs/next","POST /api/worker/jobs/{id}/results"]
     },
     "dataset_import":{"formats":["CSV","JSON array or object","JSONL"],"encoding":["identity","gzip"],"maximum_bytes":MAX_IMPORT_BYTES,"maximum_chunk_bytes":MAX_IMPORT_CHUNK,"resume":"Reuse the import id and continue at the returned byte offset; failed parsing can be retried with POST /api/admin/datasets/imports/{id}/resume"}
@@ -512,6 +512,19 @@ def create_auth(p:AuthCreate,x_admin_token:Annotated[str|None,Header()]=None):
 def auths(x_admin_token:Annotated[str|None,Header()]=None):
     admin(x_admin_token)
     with connection() as db:return {"authorizations":[dict(r) for r in db.execute("SELECT * FROM authorizations ORDER BY id DESC")]}
+
+@app.get("/api/admin/hosts/{ip}/authorization")
+def host_authorization(ip:str,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    try:address=ipaddress.ip_address(ip)
+    except ValueError as exc:raise HTTPException(400,"Invalid IP address") from exc
+    with connection() as db:rows=[dict(row) for row in db.execute("SELECT id,name,cidr FROM authorizations WHERE enabled=1 ORDER BY id")]
+    for row in rows:
+        try:network=ipaddress.ip_network(row["cidr"],strict=False)
+        except ValueError:continue
+        if address.version==network.version and address in network:
+            return {"authorized":True,"authorization_id":row["id"],"name":row["name"],"cidr":row["cidr"]}
+    return {"authorized":False,"authorization_id":None,"name":None,"cidr":None}
 
 @app.post("/api/admin/authorizations/{auth_id}/revoke")
 def revoke_auth(auth_id:int,x_admin_token:Annotated[str|None,Header()]=None):

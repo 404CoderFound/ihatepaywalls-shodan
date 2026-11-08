@@ -15,7 +15,7 @@ Status records what is implemented in this checkout, not parity with a commercia
 | Maps/trends/reports | Interactive offline choropleth using bundled Natural Earth 1:110m boundaries and real indexed country counts; country click-through, hover counts, actual observation-date trends, other aggregates and source-aware CSV export implemented |
 | Saved searches | Admin saved-search storage API implemented; edit/delete/user ownership and UI remain incomplete |
 | Python SDK/CLI | Dependency-free search/host/history/vulnerability/analytics client, resumable dataset upload and CLI implemented; administrator operations beyond dataset ingestion remain REST-only |
-| Separate authorized scanning workers | Existing architecture preserved; no new scan protocols or scheduler expansion in this work |
+| Separate authorized scanning workers | Web image remains scanner-free; worker enforces returned authorization CIDR; admin Scan Now is shown only when an admin-only server check confirms the target is currently within an enabled allowlist; job creation rechecks authorization; no new scan protocols in this work |
 | Browser sections | Data-backed domains/network/maps/trends/CVE/monitor/reports/account/API views; provider toggles and resumable dataset upload in Admin; image section explicitly reports no screenshots and does not probe remote hosts |
 | Public API rate limiting | Applied across public `/api/*` reads; tested |
 | Production-like staging restore / operator dataset | Isolated Compose file added; restore not run because no operator-provided database copy is available |
@@ -24,7 +24,7 @@ Status records what is implemented in this checkout, not parity with a commercia
 
 ## Verification evidence (2026-11-08)
 
-- `./.venv/bin/pytest -q`: 53 passed, 1 skipped, 3 dependency/framework deprecation warnings.
+- `./.venv/bin/pytest -q`: 54 passed, 1 skipped, 3 dependency/framework deprecation warnings.
 - `python -m py_compile app/*.py sdk/client.py cli.py` and `node --check` are in CI.
 - `scripts/validate_staging.sh` provides isolated Compose health/API validation and retains its named staging volume on teardown.
 - Docker is not installed in the local development environment; the staging container workflow has not been run locally. CI is configured to run it on a Docker-capable runner.
