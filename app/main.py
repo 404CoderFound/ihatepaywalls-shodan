@@ -570,7 +570,7 @@ async def upload_host_screenshot(ip:str,request:Request,
 def list_host_screenshots(x_admin_token:Annotated[str|None,Header()]=None):
     admin(x_admin_token);results=[]
     with connection() as db:
-        rows=db.execute("SELECT id,ip,filename,media_type,sha256,note,created_at FROM host_screenshots ORDER BY id DESC LIMIT 500").fetchall()
+        rows=db.execute("SELECT id,ip,filename,media_type,sha256,note,created_at uploaded_at FROM host_screenshots ORDER BY id DESC LIMIT 500").fetchall()
         authorized=[dict(row) for row in db.execute("SELECT cidr FROM authorizations WHERE enabled=1")]
     for row in rows:
         address=ipaddress.ip_address(row["ip"])
