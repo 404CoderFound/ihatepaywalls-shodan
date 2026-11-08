@@ -7,7 +7,8 @@ const esc = value => String(value ?? "").replace(/[&<>"']/g, char => (
 let activeQuery = "";
 let csrfToken = sessionStorage.getItem("scanlattice_csrf") || "";
 let enrichmentTimer = null;
-document.querySelector("#page-docs .sectionheader span").textContent = "VERSION 0.3";
+document.querySelector("#page-docs .sectionheader span").textContent = "VERSION 0.4";
+document.querySelector("footer .right").textContent = "CONTROL PLANE v0.4 / HOST INDEX + PASSIVE DISCOVERY";
 
 function toast(message) {
   const element = $("toast");
@@ -47,7 +48,7 @@ async function route() {
   if (page === "search") {
     activeQuery = params.get("q") || activeQuery;
     $("header-query").value = activeQuery;
-    await search(activeQuery, Number(params.get("page") || 1));
+    await search(activeQuery, Number(params.get("page") || 1), Number(params.get("prefix_page") || 1), Number(params.get("metadata_page") || 1));
   } else if (page === "host") {
     await loadHost(params.get("ip"));
   } else if (page === "admin") {
@@ -88,46 +89,73 @@ function passiveCard(row) {
   </article>`;
 }
 
-async function search(query, page) {
+function hostCard(host) {
+  const services = host.services || [];
+  return `<article class="observation host-card">
+    <h3><a href="#host?ip=${encodeURIComponent(host.ip)}">${esc(host.ip)}</a></h3>
+    <div class="org">${esc(host.hostname || host.hostnames?.[0]?.hostname || "No hostname")} · ${esc(host.asn || "Unknown ASN")} · ${esc(host.org || "Unknown organization")}</div>
+    <div class="meta">First seen: ${esc(host.first_seen)} · Last observed: ${esc(host.last_seen)} · Source: ${esc(host.source || "indexed observation")}${host.network_prefix ? ` · Prefix: ${esc(host.network_prefix)}` : ""}</div>
+    <div>${services.map(service => `<span class="service">${service.port}/${esc(service.proto)} ${esc(service.service || service.product || "unknown")}</span>`).join("") || '<span class="service">NO INDEXED SERVICES</span>'}</div>
+    ${services.slice(0,3).map(service => `<div class="service-detail"><b>${service.port}/${esc(service.proto)} ${esc(service.product || service.service || "")}</b><span>${esc(service.banner || service.http?.status || "No banner metadata")}</span><small>Observed ${esc(service.last_seen)} · ${esc(service.source)}</small></div>`).join("")}
+  </article>`;
+}
+
+function pageUrl(query, page, prefixPage=1, metadataPage=1) {
+  return `#search?q=${encodeURIComponent(query)}&page=${page}&prefix_page=${prefixPage}&metadata_page=${metadataPage}`;
+}
+
+function numberedPagination(data, query, prefixPage, metadataPage) {
+  if (!data.total_pages) return "";
+  const pages=[];
+  for (let number=1;number<=data.total_pages;number++) {
+    if (data.total_pages>15 && number>2 && number<data.total_pages-1 && Math.abs(number-data.page)>2) {
+      if (pages.at(-1)!=="…") pages.push("…");
+      continue;
+    }
+    pages.push(`<a class="${number===data.page?"current":""}" href="${pageUrl(query,number,prefixPage,metadataPage)}">${number}</a>`);
+  }
+  return `${data.has_previous?`<a href="${pageUrl(query,data.page-1,prefixPage,metadataPage)}">← Previous</a>`:""}${pages.join("")}${data.has_next?`<a href="${pageUrl(query,data.page+1,prefixPage,metadataPage)}">Next →</a>`:""}`;
+}
+
+function asnOverview(asn, query, hostPage, metadataPage) {
+  if (!asn) return "";
+  const networks=asn.announced_networks;
+  const prefixRows=networks.results.map(row=>`<tr><td><a href="#search?q=${encodeURIComponent(`net:${row.prefix}`)}">${esc(row.prefix)}</a></td><td>${row.prefix.includes(":")?"IPv6":"IPv4"}</td><td>${esc(row.source)}</td><td>${esc(row.last_seen)}</td></tr>`).join("");
+  const prefixNav=`${networks.page>1?`<a href="${pageUrl(query,hostPage,networks.page-1,metadataPage)}">← Previous networks</a>`:""}${networks.has_next?`<a href="${pageUrl(query,hostPage,networks.page+1,metadataPage)}">Next networks →</a>`:""}`;
+  return `<section class="asn-overview"><div class="asn-title"><div><small>ASN INTELLIGENCE</small><h2>${esc(asn.asn)} — ${esc(asn.organization || "Unknown organization")}</h2></div><span>Updated ${esc(asn.last_enrichment || "not yet")}</span></div><div class="asn-stats"><div><strong>${asn.statistics.ipv4_prefixes ?? 0}</strong><span>IPv4 PREFIXES</span></div><div><strong>${asn.statistics.ipv6_prefixes ?? 0}</strong><span>IPv6 PREFIXES</span></div><div><strong>${asn.indexed_host_count}</strong><span>INDEXED HOSTS</span></div><div><strong>${asn.indexed_service_count}</strong><span>INDEXED SERVICES</span></div></div><div class="asn-meta"><b>Sources:</b> ${esc(asn.sources.join(", ") || "enrichment pending")}<details><summary>Technical ASN details</summary><pre>${esc(JSON.stringify(asn.overview,null,2))}</pre></details></div><div class="coverage-note">${esc(asn.host_intelligence.message)}${asn.host_intelligence.sources.length?` Sources: ${esc(asn.host_intelligence.sources.join(", "))}`:" No external host/service dataset is currently contributing results."}</div><h3>Announced Networks <span>${networks.total}</span></h3><table class="workers"><thead><tr><th>PREFIX</th><th>FAMILY</th><th>SOURCE</th><th>FRESHNESS</th></tr></thead><tbody>${prefixRows||'<tr><td colspan="4">Gathering announced networks…</td></tr>'}</tbody></table><div class="subpagination">${prefixNav}</div><h3>Discovered Hosts <span>${asn.indexed_host_count}</span></h3></section>`;
+}
+
+async function search(query, page, prefixPage=1, metadataPage=1) {
   $("result-query").textContent = query ? `/ ${query}` : "";
   $("result-items").innerHTML = '<div class="empty">Loading public index...</div>';
   try {
-    const data = await api(`/api/search?q=${encodeURIComponent(query)}&page=${page}&limit=25`);
-    renderEnrichment(data.enrichment, query, page);
-    $("search-meta").textContent = `${data.total} indexed observation(s) / ${data.passive_total} passive record(s)`;
+    const data = await api(`/api/search?q=${encodeURIComponent(query)}&page=${page}&prefix_page=${prefixPage}&metadata_page=${metadataPage}`);
+    renderEnrichment(data.enrichment, query, page, prefixPage, metadataPage);
+    $("search-meta").textContent = data.total ? `Hosts ${data.range_start}–${data.range_end} of ${data.total}` : `0 indexed hosts`;
     const facets = (id, values, key) => {
       $(id).innerHTML = Object.entries(values).sort((a,b) => b[1]-a[1]).slice(0,10)
         .map(([value,count]) => `<div><a href="#search?q=${encodeURIComponent(`${key}:${value}`)}">${esc(value)}</a><span>${count}</span></div>`).join("") || "No data";
     };
     facets("facet-ports", data.facets.ports, "port");
     facets("facet-countries", data.facets.countries, "country");
-    const indexed = data.indexed_observations.map(row => `<article class="observation">
-      <h3><a href="#host?ip=${encodeURIComponent(row.ip)}">${esc(row.ip)}</a></h3>
-      <div class="org">${esc(row.hostname || row.org || "Unknown organization")}</div>
-      <div class="meta">HISTORICAL OBSERVATION · ${esc(row.country || "Unknown country")} · ${esc(row.asn)} · Observed: ${esc(row.seen_at)} · Source: ${esc(row.source)}${row.is_demo ? " · DEMO DATA" : ""}</div>
-      <div><span class="service">${row.port}/${esc(row.proto)}</span><span class="service">${esc(row.service || row.product || "Unknown service")}</span></div>
-      <pre>${esc(row.banner || "No banner collected")}</pre>
-    </article>`).join("");
+    const indexed = data.hosts.map(hostCard).join("");
     const passive = data.passive_intelligence.map(passiveCard).join("");
     $("result-items").innerHTML = data.has_information
-      ? `${indexed ? `<h3 class="result-category">Indexed Observations</h3>${indexed}` : ""}${passive ? `<h3 class="result-category">Passive Intelligence</h3>${passive}` : ""}`
+      ? `${asnOverview(data.asn_intelligence,query,data.page,metadataPage)}${indexed ? `<h3 class="result-category">Indexed Service Observations</h3>${indexed}` : data.asn_intelligence?'<div class="empty compact"><strong>No indexed hosts for this ASN.</strong>Announced networks are not treated as active hosts.</div>':""}${passive ? `<h3 class="result-category">Passive Intelligence</h3>${passive}` : ""}`
       : `<div class="empty"><strong>${esc(data.message)}</strong>No active measurement was started.</div>`;
-    const links = [];
-    if (page > 1) links.push(`<a href="#search?q=${encodeURIComponent(query)}&page=${page-1}">← Previous</a>`);
-    if (page < data.pages) links.push(`<a href="#search?q=${encodeURIComponent(query)}&page=${page+1}">Next →</a>`);
-    $("pagination").innerHTML = links.join("");
+    $("pagination").innerHTML = numberedPagination(data,query,prefixPage,metadataPage);
   } catch (error) {
     $("result-items").innerHTML = `<div class="empty"><strong>Search unavailable</strong>${esc(error.message)}</div>`;
   }
 }
 
-function renderEnrichment(job, query, page) {
+function renderEnrichment(job, query, page, prefixPage=1, metadataPage=1) {
   clearTimeout(enrichmentTimer);
   const box = $("enrichment-status");
   if (!job || !job.id) {box.innerHTML = ""; return;}
   if (job.status === "enriching") {
     box.innerHTML = '<div class="enrichment-banner"><b>Gathering passive intelligence…</b><span>Results will update automatically.</span></div>';
-    enrichmentTimer = setTimeout(() => pollEnrichment(job.id, query, page), 1500);
+    enrichmentTimer = setTimeout(() => pollEnrichment(job.id, query, page, prefixPage, metadataPage), 1500);
   } else if (job.status === "failed") {
     box.innerHTML = `<div class="enrichment-banner failed"><b>Passive enrichment failed.</b><span>${esc(job.error || "Providers returned no usable data.")}</span></div>`;
   } else {
@@ -135,11 +163,11 @@ function renderEnrichment(job, query, page) {
   }
 }
 
-async function pollEnrichment(jobId, query, page) {
+async function pollEnrichment(jobId, query, page, prefixPage=1, metadataPage=1) {
   try {
     const job = await api(`/api/enrichment/${jobId}`);
-    if (["completed","partial","failed"].includes(job.status)) await search(query, page);
-    else enrichmentTimer = setTimeout(() => pollEnrichment(jobId, query, page), 1500);
+    if (["completed","partial","failed"].includes(job.status)) await search(query, page, prefixPage, metadataPage);
+    else enrichmentTimer = setTimeout(() => pollEnrichment(jobId, query, page, prefixPage, metadataPage), 1500);
   } catch (error) {
     $("enrichment-status").innerHTML = `<div class="enrichment-banner failed">${esc(error.message)}</div>`;
   }

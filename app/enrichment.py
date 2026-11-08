@@ -15,10 +15,11 @@ from typing import Any
 from .database import connection, utc_now
 from .search import ParsedQuery
 
-USER_AGENT = "ScanLattice/0.3 (+https://scanlattice.plezi.eu; passive intelligence cache)"
+USER_AGENT = "ScanLattice/0.4 (+https://scanlattice.plezi.eu; passive intelligence cache)"
 _EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="passive-enrichment")
 _LOCK = threading.Lock()
 _RUNNING: set[str] = set()
+_SCHEDULER_STARTED = False
 
 
 @dataclass
@@ -157,6 +158,20 @@ def _store_records(db, provider_id: int, records: list[dict[str, Any]], ttl: int
           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(subject,record_type,source,value_json) DO UPDATE SET observed_at=excluded.observed_at,expires_at=excluded.expires_at""",
           (row["subject"],row["subject_type"],row.get("ip",""),row.get("domain",""),row.get("asn",""),row.get("org",""),row.get("network",""),row["record_type"],json.dumps(row["value"],sort_keys=True),row["source"],row["observed_at"],expires,provider_id))
         count+=1 if cursor.rowcount else 0
+        if row.get("network") and row.get("asn"):
+            try:
+                network=ipaddress.ip_network(row["network"],strict=False)
+                db.execute("""INSERT INTO routing_prefixes(prefix,asn,organization,source,first_seen,last_seen,expires_at)
+                  VALUES(?,?,?,?,?,?,?) ON CONFLICT(prefix,asn,source) DO UPDATE SET organization=excluded.organization,last_seen=excluded.last_seen,expires_at=excluded.expires_at""",
+                  (str(network),row["asn"].upper(),row.get("org",""),row["source"],row["observed_at"],row["observed_at"],expires))
+                for host in db.execute("SELECT ip,network_prefix FROM hosts").fetchall():
+                    address=ipaddress.ip_address(host["ip"])
+                    if address.version!=network.version or address not in network:continue
+                    current=ipaddress.ip_network(host["network_prefix"],strict=False) if host["network_prefix"] else None
+                    if current is None or network.prefixlen>=current.prefixlen:
+                        db.execute("UPDATE hosts SET asn=?,org=CASE WHEN ?!='' THEN ? ELSE org END,network_prefix=? WHERE ip=?",(row["asn"].upper(),row.get("org",""),row.get("org",""),str(network),host["ip"]))
+            except ValueError:
+                pass
     return count
 
 
@@ -220,3 +235,35 @@ def recover_pending() -> None:
     with connection() as db:
         rows=db.execute("SELECT id FROM enrichment_jobs WHERE status='enriching' AND attempts<max_attempts").fetchall()
     for row in rows:queue_job(row["id"])
+
+
+def run_due_schedules_once() -> int:
+    from .search import parse_query
+    now=int(time.time());queued=0
+    with connection() as db:schedules=db.execute("SELECT * FROM indexing_schedules WHERE enabled=1 AND next_run_at<=? ORDER BY next_run_at LIMIT 20",(now,)).fetchall()
+    for schedule in schedules:
+        try:
+            parsed=parse_query(schedule["query"]);target=enrichment_target(parsed)
+            if target is None:raise ValueError("Schedule query must identify one ASN, IP, CIDR, domain or hostname")
+            key=f"{target[0]}:{target[1]}"
+            with connection() as db:
+                db.execute("UPDATE enrichment_jobs SET cache_expires_at=0 WHERE query_key=? AND status!='enriching'",(key,))
+                job,should_queue=ensure_enrichment(db,parsed,True)
+                db.execute("UPDATE indexing_schedules SET last_run_at=?,next_run_at=?,last_job_id=?,last_status='enriching',last_error='' WHERE id=?",(now,now+schedule["interval_seconds"],job.get("id") if job else None,schedule["id"]))
+            if should_queue and job:queue_job(job["id"]);queued+=1
+        except Exception as exc:
+            with connection() as db:db.execute("UPDATE indexing_schedules SET last_run_at=?,next_run_at=?,last_status='failed',last_error=? WHERE id=?",(now,now+schedule["interval_seconds"],str(exc)[:500],schedule["id"]))
+    return queued
+
+
+def start_schedule_runner() -> None:
+    global _SCHEDULER_STARTED
+    with _LOCK:
+        if _SCHEDULER_STARTED:return
+        _SCHEDULER_STARTED=True
+    def loop():
+        while True:
+            try:run_due_schedules_once()
+            except Exception:pass
+            time.sleep(30)
+    threading.Thread(target=loop,name="passive-index-scheduler",daemon=True).start()

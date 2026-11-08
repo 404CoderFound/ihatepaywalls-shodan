@@ -5,7 +5,7 @@ from pathlib import Path
 from worker.scanners import scan_endpoint
 
 CONTROL=os.getenv("CONTROL_URL","").rstrip("/");ENROLL=os.getenv("ENROLLMENT_TOKEN","");NAME=os.getenv("WORKER_NAME",socket.gethostname())
-STATE=Path(os.getenv("WORKER_STATE_FILE","/data/registration.json"));INTERVAL=int(os.getenv("HEARTBEAT_SECONDS","10"));MAX_CONCURRENT=int(os.getenv("WORKER_MAX_CONCURRENT","1"));VERSION="0.3.0"
+STATE=Path(os.getenv("WORKER_STATE_FILE","/data/registration.json"));INTERVAL=int(os.getenv("HEARTBEAT_SECONDS","10"));MAX_CONCURRENT=int(os.getenv("WORKER_MAX_CONCURRENT","1"));VERSION="0.4.0"
 CAPABILITIES=["tcp-connect","http-headers","tls-metadata","ssh-identification"]
 
 def call(path,payload=None,headers=None):

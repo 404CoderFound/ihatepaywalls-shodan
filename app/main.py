@@ -10,9 +10,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.datastructures import Headers
 from .database import connection, init_db, utc_now
-from .search import QueryError, build_sql, parse_query
+from .search import QueryError, parse_query
+from .host_search import asn_intelligence, search_hosts
 from .passive import APPROVED_RDAP_BASES, provider_status, search_cached
-from .enrichment import enrichment_target, ensure_enrichment, queue_job, recover_pending
+from .enrichment import enrichment_target, ensure_enrichment, queue_job, recover_pending, run_due_schedules_once, start_schedule_runner
 from .rate_limit import FixedWindowLimiter
 
 ROOT=Path(__file__).resolve().parent
@@ -26,7 +27,7 @@ ENRICHMENT_ENABLED=os.getenv("PASSIVE_ENRICHMENT_ENABLED","true").lower()=="true
 MAX_ENRICHMENT_QUEUE=int(os.getenv("MAX_ENRICHMENT_QUEUE","100"))
 MAX_CAMPAIGN_TARGETS=int(os.getenv("MAX_CAMPAIGN_TARGETS","65536"));MAX_BATCH_TARGETS=int(os.getenv("MAX_BATCH_TARGETS","256"))
 RATE_LIMITER=FixedWindowLimiter()
-app=FastAPI(title="ScanLattice API",version="0.3.0",docs_url=None,redoc_url=None)
+app=FastAPI(title="ScanLattice API",version="0.4.0",docs_url=None,redoc_url=None)
 app.mount("/static",StaticFiles(directory=ROOT/"static"),name="static")
 
 @app.middleware("http")
@@ -76,34 +77,38 @@ def audit(db,action:str,details:dict,actor="admin"):
     db.execute("INSERT INTO audit_logs(action,actor,details,created_at) VALUES(?,?,?,?)",(action,actor,json.dumps(details),utc_now()))
 
 @app.on_event("startup")
-def startup():init_db(SEED_DEMO);recover_pending() if ENRICHMENT_ENABLED else None
+def startup():
+    init_db(SEED_DEMO)
+    if ENRICHMENT_ENABLED:recover_pending();start_schedule_runner()
 @app.get("/")
 def home():return FileResponse(ROOT/"static"/"index.html")
 @app.get("/api/health")
-def health():return {"status":"ok","role":"control-plane","active_scanning":False,"passive_enrichment":ENRICHMENT_ENABLED,"version":"0.3.0"}
+def health():return {"status":"ok","role":"control-plane","active_scanning":False,"passive_enrichment":ENRICHMENT_ENABLED,"host_page_size":10,"version":"0.4.0"}
 @app.get("/api/stats")
 def stats():
     with connection() as db:return {"observations":db.execute("SELECT COUNT(*) FROM observations").fetchone()[0],"services":db.execute("SELECT COUNT(*) FROM services").fetchone()[0],"hosts":db.execute("SELECT COUNT(*) FROM (SELECT ip FROM hosts UNION SELECT ip FROM passive_records WHERE ip!='')").fetchone()[0],"passive_records":db.execute("SELECT COUNT(*) FROM passive_records").fetchone()[0],"workers_online":db.execute("SELECT COUNT(*) FROM workers WHERE last_seen>?",(int(time.time())-OFFLINE,)).fetchone()[0],"demo_enabled":SEED_DEMO}
 
 @app.get("/api/search")
-def search(q:str=Query("",max_length=500),page:int=Query(1,ge=1),limit:int=Query(25,ge=1,le=100)):
+def search(q:str=Query("",max_length=500),page:int=Query(1,ge=1),prefix_page:int=Query(1,ge=1),metadata_page:int=Query(1,ge=1),limit:int|None=Query(None,include_in_schema=False)):
     try: parsed=parse_query(q)
     except QueryError as exc:raise HTTPException(400,str(exc)) from exc
-    where,params,nets=build_sql(parsed)
     should_queue=False;enrichment_job=None
     with connection() as db:
-        rows=[dict(r) for r in db.execute("SELECT o.* FROM observations o"+where+" ORDER BY o.seen_at DESC,o.id DESC",params)]
+        host_page=search_hosts(db,parsed,page)
         passive=search_cached(db,parsed)
         enrichment_job,should_queue=ensure_enrichment(db,parsed,ENRICHMENT_ENABLED,MAX_ENRICHMENT_QUEUE)
         enrichment=provider_status(db)
+        asn_values=parsed.filters.get("asn",[])
+        asn_result=asn_intelligence(db,asn_values[0],prefix_page,metadata_page) if len(asn_values)==1 else None
     if should_queue and enrichment_job:queue_job(enrichment_job["id"])
-    if nets:rows=[r for r in rows if all(ipaddress.ip_address(r["ip"]) in n for n in nets)]
     facets={"ports":{},"countries":{},"products":{}}
-    for r in rows:
-        for name,value in (("ports",str(r["port"])),("countries",r["country"] or "Unknown"),("products",r["product"] or "Unknown")):facets[name][value]=facets[name].get(value,0)+1
-    total=len(rows); start=(page-1)*limit
-    passive_start=(page-1)*limit
-    return {"query":q,"page":page,"limit":limit,"pages":max(1,(max(total,len(passive))+limit-1)//limit),"total":total,"passive_total":len(passive),"results":rows[start:start+limit],"indexed_observations":rows[start:start+limit],"passive_intelligence":passive[passive_start:passive_start+limit],"has_information":bool(rows or passive),"message":None if rows or passive else "No indexed or passive information available.","enrichment":dict(enrichment_job) if enrichment_job else enrichment,"facets":facets}
+    for host_row in host_page["hosts"]:
+        country=host_row["country"] or "Unknown";facets["countries"][country]=facets["countries"].get(country,0)+1
+        for service_row in host_row["services"]:
+            port=str(service_row["port"]);product=service_row["product"] or "Unknown";facets["ports"][port]=facets["ports"].get(port,0)+1;facets["products"][product]=facets["products"].get(product,0)+1
+    passive_total=len(passive);metadata_per_page=25;metadata_start=(metadata_page-1)*metadata_per_page
+    passive_page=[] if asn_result else passive[metadata_start:metadata_start+metadata_per_page]
+    return {"query":q,**{key:host_page[key] for key in ("page","per_page","total","total_pages","has_next","has_previous","range_start","range_end")},"pages":host_page["total_pages"],"results":host_page["hosts"],"hosts":host_page["hosts"],"indexed_observations":host_page["hosts"],"passive_total":passive_total,"passive_intelligence":passive_page,"passive_pagination":{"page":metadata_page,"per_page":metadata_per_page,"total":passive_total,"total_pages":math.ceil(passive_total/metadata_per_page) if passive_total else 0,"has_next":metadata_start+metadata_per_page<passive_total},"asn_intelligence":asn_result,"has_information":bool(host_page["total"] or passive or asn_result),"message":None if host_page["total"] or passive or asn_result else "No indexed or passive information available.","enrichment":dict(enrichment_job) if enrichment_job else enrichment,"facets":facets}
 
 @app.get("/api/enrichment/{job_id}")
 def enrichment_status(job_id:str):
@@ -124,7 +129,7 @@ def host(ip:str):
     return {"host":dict(h) if h else {"ip":ip,"last_scan_at":""},"services":rows,"latest_by_port":list(latest.values()),"passive_intelligence":passive}
 
 @app.get("/api/docs")
-def docs():return {"version":"0.3.0","authentication":{"public":"none","admin_browser":"HttpOnly session cookie plus X-CSRF-Token for mutations","admin_api":"X-Admin-Token","worker":"X-Worker-Token"},"search_examples":["port:443","asn:30925","asn:AS30925","country:NL",'org:"Example Organization"',"domain:example.org","service:ssh","net:192.0.2.0/24"],"endpoints":["GET /api/search","GET /api/enrichment/{id}","GET /api/hosts/{ip}","GET /api/stats","POST /api/admin/session","POST /api/admin/deep-recon/preview","POST /api/admin/deep-recon/launch","POST /api/admin/jobs","POST /api/admin/import","POST /api/admin/passive/import"]}
+def docs():return {"version":"0.4.0","authentication":{"public":"none","admin_browser":"HttpOnly session cookie plus X-CSRF-Token for mutations","admin_api":"X-Admin-Token","worker":"X-Worker-Token"},"pagination":{"hosts_per_page":10,"prefixes_per_page":25,"metadata_per_page":25},"search_examples":["port:443","asn:30925","asn:AS30925","country:NL",'org:"Example Organization"',"domain:example.org","service:ssh","net:192.0.2.0/24"],"endpoints":["GET /api/search","GET /api/enrichment/{id}","GET /api/hosts/{ip}","GET /api/stats","POST /api/admin/session","POST /api/admin/deep-recon/preview","POST /api/admin/deep-recon/launch","POST /api/admin/datasets/ingest","POST /api/admin/indexing/schedules","POST /api/admin/jobs","POST /api/admin/import","POST /api/admin/passive/import"]}
 
 class SessionLogin(BaseModel):
     admin_token:str=Field(min_length=1,max_length=500)
@@ -238,6 +243,20 @@ class PassiveRecord(BaseModel):
 class PassiveImport(BaseModel):
     records:list[PassiveRecord]=Field(min_length=1,max_length=1000)
 
+class DatasetPage(BaseModel):
+    dataset_id:str=Field(min_length=2,max_length=120)
+    source:str=Field(min_length=2,max_length=200)
+    cursor:str=Field(default="",max_length=500)
+    next_cursor:str=Field(default="",max_length=500)
+    complete:bool=False
+    observations:list[Observation]=Field(min_length=1,max_length=1000)
+
+class ScheduleCreate(BaseModel):
+    name:str=Field(min_length=2,max_length=100)
+    query:str=Field(min_length=1,max_length=500)
+    interval_seconds:int=Field(ge=300,le=31536000)
+    enabled:bool=True
+
 class ProviderCreate(BaseModel):
     name:str=Field(min_length=2,max_length=100)
     provider_type:str=Field(pattern="^(import|ripestat|rdap|passive_dns|certificate_transparency)$")
@@ -260,11 +279,22 @@ class ProfileCreate(BaseModel):
 def store(db,rows:list[Observation],source:str,jid=None,wid=None):
     now=utc_now()
     for r in rows:
-        try:ipaddress.ip_address(r.ip)
+        try:address=ipaddress.ip_address(r.ip)
         except ValueError as exc:raise HTTPException(400,f"Invalid IP: {r.ip}") from exc
-        observation=db.execute("INSERT INTO observations(ip,port,proto,hostname,asn,org,country,service,product,banner,source,seen_at,http_json,tls_json,ssh_id,latency_ms,scan_job_id,worker_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(r.ip,r.port,r.proto,r.hostname,r.asn.upper(),r.org,r.country.upper(),r.service,r.product,r.banner,source,now,json.dumps(r.http),json.dumps(r.tls),r.ssh_id,r.latency_ms,jid,wid))
-        db.execute("INSERT INTO hosts(ip,hostname,asn,org,country,first_seen,last_seen,last_scan_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(ip) DO UPDATE SET hostname=CASE WHEN excluded.hostname!='' THEN excluded.hostname ELSE hosts.hostname END,asn=CASE WHEN excluded.asn!='' THEN excluded.asn ELSE hosts.asn END,org=CASE WHEN excluded.org!='' THEN excluded.org ELSE hosts.org END,country=CASE WHEN excluded.country!='' THEN excluded.country ELSE hosts.country END,last_seen=excluded.last_seen,last_scan_at=excluded.last_scan_at",(r.ip,r.hostname,r.asn.upper(),r.org,r.country.upper(),now,now,now if jid else ""))
-        db.execute("INSERT INTO services(host_ip,port,proto,service,product,first_seen,last_seen,last_observation_id) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(host_ip,port,proto) DO UPDATE SET service=excluded.service,product=excluded.product,last_seen=excluded.last_seen,last_observation_id=excluded.last_observation_id",(r.ip,r.port,r.proto,r.service,r.product,now,now,observation.lastrowid))
+        asn=r.asn.upper();asn=f"AS{int(asn.removeprefix('AS'))}" if asn.removeprefix("AS").isdigit() else asn;org=r.org;network_prefix=""
+        matches=[]
+        for prefix in db.execute("SELECT prefix,asn,organization FROM routing_prefixes WHERE expires_at IS NULL OR expires_at>?",(int(time.time()),)):
+            try:
+                network=ipaddress.ip_network(prefix["prefix"],strict=False)
+                if address.version==network.version and address in network:matches.append((network.prefixlen,prefix,network))
+            except ValueError:continue
+        if matches:
+            _,mapping,network=max(matches,key=lambda item:item[0]);network_prefix=str(network);asn=asn or mapping["asn"];org=org or mapping["organization"]
+        fingerprint=hashlib.sha256(json.dumps([r.ip,r.port,r.proto,r.service,r.product,r.banner,source,now],separators=(",",":"),sort_keys=True).encode()).hexdigest()
+        observation=db.execute("INSERT INTO observations(ip,port,proto,hostname,asn,org,country,service,product,banner,source,seen_at,http_json,tls_json,ssh_id,latency_ms,scan_job_id,worker_id,observation_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(r.ip,r.port,r.proto,r.hostname,asn,org,r.country.upper(),r.service,r.product,r.banner,source,now,json.dumps(r.http),json.dumps(r.tls),r.ssh_id,r.latency_ms,jid,wid,fingerprint))
+        db.execute("INSERT INTO hosts(ip,hostname,asn,org,country,first_seen,last_seen,last_scan_at,network_prefix,source,ip_version,ip_hex) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(ip) DO UPDATE SET hostname=CASE WHEN excluded.hostname!='' THEN excluded.hostname ELSE hosts.hostname END,asn=CASE WHEN excluded.asn!='' THEN excluded.asn ELSE hosts.asn END,org=CASE WHEN excluded.org!='' THEN excluded.org ELSE hosts.org END,country=CASE WHEN excluded.country!='' THEN excluded.country ELSE hosts.country END,last_seen=excluded.last_seen,last_scan_at=CASE WHEN excluded.last_scan_at!='' THEN excluded.last_scan_at ELSE hosts.last_scan_at END,network_prefix=CASE WHEN excluded.network_prefix!='' THEN excluded.network_prefix ELSE hosts.network_prefix END,source=excluded.source",(r.ip,r.hostname,asn,org,r.country.upper(),now,now,now if jid else "",network_prefix,source,address.version,f"{int(address):032x}"))
+        db.execute("INSERT INTO services(host_ip,port,proto,service,product,first_seen,last_seen,last_observation_id,source,banner,http_json,tls_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(host_ip,port,proto) DO UPDATE SET service=excluded.service,product=excluded.product,last_seen=excluded.last_seen,last_observation_id=excluded.last_observation_id,source=excluded.source,banner=excluded.banner,http_json=excluded.http_json,tls_json=excluded.tls_json",(r.ip,r.port,r.proto,r.service,r.product,now,now,observation.lastrowid,source,r.banner,json.dumps(r.http),json.dumps(r.tls)))
+        if r.hostname:db.execute("INSERT INTO hostnames(ip,hostname,source,first_seen,last_seen) VALUES(?,?,?,?,?) ON CONFLICT(ip,hostname,source) DO UPDATE SET last_seen=excluded.last_seen",(r.ip,r.hostname.lower(),source,now,now))
     return len(rows)
 
 @app.post("/api/worker/jobs/{jid}/results")
@@ -314,8 +344,51 @@ def import_passive(p:PassiveImport,x_admin_token:Annotated[str|None,Header()]=No
             db.execute("""INSERT INTO passive_records(subject,subject_type,ip,domain,asn,org,network,record_type,value_json,source,observed_at,expires_at)
               VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(subject,record_type,source,value_json) DO UPDATE SET observed_at=excluded.observed_at,expires_at=excluded.expires_at""",
               (row.subject,row.subject_type,row.ip,row.domain.lower(),row.asn.upper(),row.org,row.network,row.record_type,json.dumps(row.value,sort_keys=True),row.source,row.observed_at,expires))
+            if row.network and row.asn:
+                network=ipaddress.ip_network(row.network,strict=False);asn=row.asn.upper();asn=f"AS{int(asn.removeprefix('AS'))}" if asn.removeprefix("AS").isdigit() else asn
+                db.execute("INSERT INTO routing_prefixes(prefix,asn,organization,source,first_seen,last_seen,expires_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(prefix,asn,source) DO UPDATE SET organization=excluded.organization,last_seen=excluded.last_seen,expires_at=excluded.expires_at",(str(network),asn,row.org,row.source,row.observed_at,row.observed_at,expires))
+                for host in db.execute("SELECT ip,network_prefix FROM hosts").fetchall():
+                    address=ipaddress.ip_address(host["ip"])
+                    if address.version!=network.version or address not in network:continue
+                    current=ipaddress.ip_network(host["network_prefix"],strict=False) if host["network_prefix"] else None
+                    if current is None or network.prefixlen>=current.prefixlen:db.execute("UPDATE hosts SET asn=?,org=CASE WHEN ?!='' THEN ? ELSE org END,network_prefix=? WHERE ip=?",(asn,row.org,row.org,str(network),host["ip"]))
         audit(db,"passive.imported",{"count":len(p.records),"sources":sorted({r.source for r in p.records})})
     return {"imported":len(p.records)}
+
+@app.post("/api/admin/datasets/ingest")
+def ingest_dataset_page(p:DatasetPage,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:
+        state=db.execute("SELECT * FROM dataset_ingestions WHERE dataset_id=?",(p.dataset_id,)).fetchone()
+        if state and state["status"]=="completed":return {"dataset_id":p.dataset_id,"status":"completed","imported":0,"cursor":state["cursor"],"deduplicated":True}
+        if state and p.next_cursor and state["cursor"]==p.next_cursor:return {"dataset_id":p.dataset_id,"status":state["status"],"imported":0,"cursor":state["cursor"],"deduplicated":True}
+        if state and state["cursor"]!=p.cursor:raise HTTPException(409,f"Expected cursor {state['cursor']!r}")
+        before=db.execute("SELECT COUNT(*) FROM services").fetchone()[0];store(db,p.observations,p.source);after=db.execute("SELECT COUNT(*) FROM services").fetchone()[0]
+        status="completed" if p.complete else "partial"
+        db.execute("INSERT INTO dataset_ingestions(dataset_id,source,cursor,records_processed,status,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(dataset_id) DO UPDATE SET cursor=excluded.cursor,records_processed=dataset_ingestions.records_processed+excluded.records_processed,status=excluded.status,updated_at=excluded.updated_at",(p.dataset_id,p.source,p.next_cursor,len(p.observations),status,utc_now()))
+        audit(db,"dataset.page_ingested",{"dataset_id":p.dataset_id,"records":len(p.observations),"new_services":after-before,"status":status})
+    return {"dataset_id":p.dataset_id,"status":status,"imported":len(p.observations),"new_services":after-before,"next_cursor":p.next_cursor}
+
+@app.post("/api/admin/indexing/schedules")
+def create_index_schedule(p:ScheduleCreate,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    try:
+        parsed=parse_query(p.query)
+        if enrichment_target(parsed) is None:raise ValueError
+    except (QueryError,ValueError) as exc:raise HTTPException(400,"Schedule query must identify one ASN, IP, CIDR, domain or hostname") from exc
+    with connection() as db:
+        cursor=db.execute("INSERT INTO indexing_schedules(name,query,interval_seconds,enabled,next_run_at,created_at) VALUES(?,?,?,?,?,?)",(p.name,p.query,p.interval_seconds,int(p.enabled),int(time.time()),utc_now()));audit(db,"indexing.schedule_created",{"id":cursor.lastrowid,"query":p.query})
+    return {"id":cursor.lastrowid,"name":p.name,"query":p.query,"interval_seconds":p.interval_seconds,"enabled":p.enabled}
+
+@app.get("/api/admin/indexing/schedules")
+def list_index_schedules(x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:rows=[dict(row) for row in db.execute("SELECT s.*,e.status job_status,e.providers_completed,e.providers_total,e.records_added,e.error job_error FROM indexing_schedules s LEFT JOIN enrichment_jobs e ON e.id=s.last_job_id ORDER BY s.id")]
+    return {"schedules":rows}
+
+@app.post("/api/admin/indexing/run-due")
+def run_due_indexing(x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token);return {"queued":run_due_schedules_once()}
 
 @app.get("/api/admin/passive/providers")
 def list_providers(x_admin_token:Annotated[str|None,Header()]=None):

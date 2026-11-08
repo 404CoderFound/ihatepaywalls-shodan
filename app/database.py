@@ -145,6 +145,33 @@ def init_db(seed_demo: bool = False) -> None:
           PRIMARY KEY(campaign_id,job_id), FOREIGN KEY(campaign_id) REFERENCES scan_campaigns(id),
           FOREIGN KEY(job_id) REFERENCES scan_jobs(id)
         );
+        CREATE TABLE IF NOT EXISTS hostnames (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT NOT NULL, hostname TEXT NOT NULL,
+          source TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+          UNIQUE(ip,hostname,source), FOREIGN KEY(ip) REFERENCES hosts(ip)
+        );
+        CREATE INDEX IF NOT EXISTS idx_hostnames_name ON hostnames(hostname);
+        CREATE INDEX IF NOT EXISTS idx_hostnames_ip ON hostnames(ip);
+        CREATE TABLE IF NOT EXISTS routing_prefixes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, prefix TEXT NOT NULL, asn TEXT NOT NULL,
+          organization TEXT NOT NULL DEFAULT '', source TEXT NOT NULL,
+          first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, expires_at INTEGER,
+          UNIQUE(prefix,asn,source)
+        );
+        CREATE INDEX IF NOT EXISTS idx_routing_asn ON routing_prefixes(asn,prefix);
+        CREATE TABLE IF NOT EXISTS indexing_schedules (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, query TEXT NOT NULL,
+          interval_seconds INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+          next_run_at INTEGER NOT NULL, last_run_at INTEGER, last_job_id TEXT,
+          last_status TEXT NOT NULL DEFAULT 'scheduled', last_error TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_indexing_due ON indexing_schedules(enabled,next_run_at);
+        CREATE TABLE IF NOT EXISTS dataset_ingestions (
+          dataset_id TEXT PRIMARY KEY, source TEXT NOT NULL, cursor TEXT NOT NULL DEFAULT '',
+          records_processed INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL,
+          error TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL
+        );
         """)
         _add_columns(db, "observations", {
             "hostname": "TEXT NOT NULL DEFAULT ''", "service": "TEXT NOT NULL DEFAULT ''",
@@ -159,6 +186,21 @@ def init_db(seed_demo: bool = False) -> None:
         _add_columns(db, "scan_profiles", {
             "rate_per_second": "REAL NOT NULL DEFAULT 20"
         })
+        _add_columns(db, "hosts", {
+            "network_prefix": "TEXT NOT NULL DEFAULT ''", "source": "TEXT NOT NULL DEFAULT ''",
+            "ip_version": "INTEGER NOT NULL DEFAULT 0", "ip_hex": "TEXT NOT NULL DEFAULT ''"
+        })
+        _add_columns(db, "services", {
+            "source": "TEXT NOT NULL DEFAULT ''", "banner": "TEXT NOT NULL DEFAULT ''",
+            "http_json": "TEXT NOT NULL DEFAULT '{}'", "tls_json": "TEXT NOT NULL DEFAULT '{}'"
+        })
+        _add_columns(db, "observations", {"observation_hash": "TEXT NOT NULL DEFAULT ''"})
+        db.execute("CREATE INDEX IF NOT EXISTS idx_hosts_asn_last ON hosts(asn,last_seen DESC,ip_hex)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_hosts_ip_sort ON hosts(ip_version,ip_hex)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_hosts_prefix ON hosts(network_prefix)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_services_port_host ON services(port,host_ip)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_services_name_host ON services(service,host_ip)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_observations_hash ON observations(observation_hash)")
         if db.execute("SELECT COUNT(*) FROM scan_profiles").fetchone()[0] == 0:
             now = utc_now()
             db.executemany("INSERT INTO scan_profiles(name,ports,connect_timeout,banner_timeout,max_concurrency,created_at) VALUES(?,?,?,?,?,?)", [
@@ -197,3 +239,30 @@ def init_db(seed_demo: bool = False) -> None:
         db.execute("""INSERT OR IGNORE INTO services(host_ip,port,proto,service,product,first_seen,last_seen,last_observation_id)
           SELECT o.ip,o.port,o.proto,COALESCE(o.service,''),o.product,MIN(o.seen_at),MAX(o.seen_at),MAX(o.id)
           FROM observations o JOIN hosts h ON h.ip=o.ip GROUP BY o.ip,o.port,o.proto""")
+        for row in db.execute("SELECT ip FROM hosts WHERE ip_version=0 OR ip_hex='' ").fetchall():
+            import ipaddress
+            address = ipaddress.ip_address(row["ip"])
+            db.execute("UPDATE hosts SET ip_version=?,ip_hex=? WHERE ip=?", (address.version, f"{int(address):032x}", row["ip"]))
+        db.execute("""UPDATE services SET source=COALESCE((SELECT o.source FROM observations o WHERE o.id=services.last_observation_id),'')
+          WHERE source=''""")
+        db.execute("""UPDATE services SET banner=COALESCE((SELECT o.banner FROM observations o WHERE o.id=services.last_observation_id),'')
+          WHERE banner=''""")
+        db.execute("""INSERT OR IGNORE INTO hostnames(ip,hostname,source,first_seen,last_seen)
+          SELECT ip,LOWER(hostname),source,MIN(seen_at),MAX(seen_at) FROM observations WHERE hostname!='' GROUP BY ip,LOWER(hostname),source""")
+        db.execute("""INSERT OR IGNORE INTO routing_prefixes(prefix,asn,organization,source,first_seen,last_seen,expires_at)
+          SELECT network,UPPER(asn),org,source,MIN(observed_at),MAX(observed_at),MAX(expires_at)
+          FROM passive_records WHERE network!='' AND asn!='' GROUP BY network,UPPER(asn),source""")
+        import ipaddress
+        mappings=[]
+        for row in db.execute("SELECT prefix,asn,organization FROM routing_prefixes").fetchall():
+            try:mappings.append((ipaddress.ip_network(row["prefix"],strict=False),row))
+            except ValueError:pass
+        for host in db.execute("SELECT ip,network_prefix FROM hosts").fetchall():
+            address=ipaddress.ip_address(host["ip"]);matches=[item for item in mappings if item[0].version==address.version and address in item[0]]
+            if matches:
+                network,mapping=max(matches,key=lambda item:item[0].prefixlen)
+                db.execute("UPDATE hosts SET network_prefix=?,asn=CASE WHEN asn='' THEN ? ELSE asn END,org=CASE WHEN org='' THEN ? ELSE org END WHERE ip=?",(str(network),mapping["asn"],mapping["organization"],host["ip"]))
+        for table in ("hosts","observations","passive_records","routing_prefixes"):
+            for row in db.execute(f"SELECT rowid AS migration_rowid,asn FROM {table} WHERE asn!=''").fetchall():
+                value=row["asn"].upper();number=value.removeprefix("AS")
+                if number.isdigit():db.execute(f"UPDATE {table} SET asn=? WHERE rowid=?",(f"AS{int(number)}",row["migration_rowid"]))

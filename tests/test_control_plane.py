@@ -16,7 +16,7 @@ def test_query_parser_pagination_and_validation(system,admin_headers):
       {"ip":"192.0.2.11","port":22,"country":"US","service":"ssh","banner":"SSH-2.0-Test"}]}
     assert client.post("/api/admin/import",headers=admin_headers,json=payload).status_code==200
     assert client.get('/api/search',params={"q":'port:443 country:NL org:"Example Organization"'}).json()["total"]==1
-    assert client.get('/api/search',params={"q":"net:192.0.2.0/24","limit":1}).json()["pages"]==2
+    page=client.get('/api/search',params={"q":"net:192.0.2.0/24"}).json();assert page["total"]==2 and page["per_page"]==10 and page["pages"]==1
     assert client.get('/api/search',params={"q":"unknown:value"}).status_code==400
     assert client.get('/api/search',params={"q":"port:99999"}).status_code==400
 

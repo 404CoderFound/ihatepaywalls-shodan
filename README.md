@@ -1,8 +1,8 @@
-# ScanLattice v0.3
+# ScanLattice v0.4
 
 Open-source network intelligence index with a passive-only FastAPI control plane and separate outbound-connected scanning workers. The interface follows the compact, utilitarian search style of the mid-2010s without using Shodan code or assets.
 
-Public visitors can search indexed observations and trigger asynchronous, cached passive enrichment without authentication. Exact ASN, IP, CIDR, domain, and hostname queries create a persistent, deduplicated enrichment job and the browser updates automatically. Administrative operations use an HttpOnly, Secure, SameSite=Strict session cookie plus a CSRF token, or the existing `X-Admin-Token` header for automation. Every `/api/admin/*` data-management endpoint performs server-side authorization independently; hiding UI controls is not treated as security.
+Public visitors can search a normalized host/service index and trigger asynchronous, cached passive enrichment without authentication. Search pages contain exactly 10 hosts, while ASN prefixes and passive metadata use independent pagination. Exact ASN, IP, CIDR, domain, and hostname queries create a persistent, deduplicated enrichment job and the browser updates automatically. Administrative operations use an HttpOnly, Secure, SameSite=Strict session cookie plus a CSRF token, or the existing `X-Admin-Token` header for automation.
 
 ## Safety boundary
 
@@ -21,7 +21,7 @@ compose.worker.yaml  scanner role only
 .env.worker.example  scanner configuration template
 ```
 
-`worker-legacy/` remains beside this repository as the migration backup. It is not used by either v0.3 Compose file.
+`worker-legacy/` remains beside this repository as the migration backup. It is not used by either v0.4 Compose file.
 
 ## Local tests
 
@@ -59,7 +59,7 @@ For the existing WebServer, stop the writer and create a consistent backup befor
 cd /opt/scanlattice
 docker compose -f compose.web.yaml stop web
 mkdir -p backups
-docker run --rm -v scanlattice_scanlattice_data:/data:ro -v /opt/scanlattice/backups:/backup alpine:3.20 sh -c 'tar -czf /backup/scanlattice-pre-v03-2026-11-08.tgz -C /data .'
+docker run --rm -v scanlattice_scanlattice_data:/data:ro -v /opt/scanlattice/backups:/backup alpine:3.20 sh -c 'tar -czf /backup/scanlattice-pre-v04-2026-11-08.tgz -C /data .'
 git pull --ff-only
 cp .env.example .env.example.review
 # Add the PASSIVE_ENRICHMENT, queue, campaign and batch variables from .env.example to .env.
@@ -91,7 +91,7 @@ The worker Compose file reuses the standard legacy volume name `worker-legacy_wo
 cd /opt/scanlattice
 docker compose -f compose.worker.yaml stop worker
 mkdir -p backups
-docker run --rm -v worker-legacy_worker_state:/data:ro -v /opt/scanlattice/backups:/backup alpine:3.20 sh -c 'tar -czf /backup/scanner01-state-pre-v03-2026-11-08.tgz -C /data .'
+docker run --rm -v worker-legacy_worker_state:/data:ro -v /opt/scanlattice/backups:/backup alpine:3.20 sh -c 'tar -czf /backup/scanner01-state-pre-v04-2026-11-08.tgz -C /data .'
 git pull --ff-only
 docker compose -f compose.worker.yaml up -d --build
 docker compose -f compose.worker.yaml logs --tail=100 worker
@@ -128,7 +128,11 @@ RIPEstat requires attribution and its service terms restrict redistribution and 
 
 ## Search
 
-Supported filters: `port`, `asn`, `country`, `org`, `product`, `service`, `ip`, `net`, `source`, `hostname`, and `domain`. `asn:30925` and `asn:AS30925` normalize identically. Filters combine with AND, quoted values work, pagination is stable, and malformed/unknown filters return HTTP 400. Results separate historical **Indexed Service Observations** from **Passive Intelligence**. Search may enqueue passive-provider work but never an active scan or worker module.
+Supported filters: `port`, `asn`, `country`, `org`, `product`, `service`, `ip`, `net`, `source`, `hostname`, and `domain`. `asn:30925` and `asn:AS30925` normalize identically. Filters combine with AND, quoted values work, and malformed filters return HTTP 400.
+
+Public search returns stable host pagination metadata: `page`, `per_page`, `total`, `total_pages`, `has_next`, `has_previous`, `range_start`, and `range_end`. `per_page` is always 10. Hosts are ordered by last observation and normalized IP keys. ASN responses additionally contain an `asn_intelligence` object with overview, counts, sources, 25-prefix pagination, passive-metadata pagination, and independent indexed host/service totals. Announced addresses are never expanded into fictional hosts.
+
+Host/service dataset pages can be ingested resumably through `POST /api/admin/datasets/ingest`. Each dataset has a cursor, progress count, provenance, and idempotent page retries. Recurring passive refreshes are managed through `GET/POST /api/admin/indexing/schedules`; this scheduler only creates passive enrichment work.
 
 ## GitHub publishing
 
@@ -138,10 +142,10 @@ Do not commit `.env`, `.env.worker`, SQLite files, `.venv`, caches, or worker re
 cd /opt/scanlattice
 git status --short
 git add app worker tests compose.web.yaml compose.worker.yaml Dockerfile requirements.txt README.md .env.example .env.worker.example .gitignore pytest.ini
-git commit -m "Implement ScanLattice v0.3 passive discovery and Deep Recon"
+git commit -m "Implement ScanLattice v0.4 host indexing and ASN pagination"
 git push origin main
 ```
 
 ## Current limitations
 
-SQLite and the persistent in-process enrichment executor are appropriate for v0.3 but should move behind PostgreSQL plus a dedicated queue before high-volume or multi-control-plane deployment. TLS collection currently records protocol, cipher, and SHA-256 certificate fingerprint rather than a complete parsed certificate chain. Certificate Transparency has an optional, administrator-enabled crt.sh JSON adapter with bounded parsing and caching. Live passive DNS is not bundled and requires attributed imports or a future permitted provider integration. Provider data is best-effort and is never converted into invented hosts or open services.
+SQLite and the persistent in-process enrichment/indexing executors are appropriate for v0.4 but should move behind PostgreSQL plus a dedicated queue before high-volume or multi-control-plane deployment. TLS collection currently records protocol, cipher, and SHA-256 certificate fingerprint rather than a complete parsed certificate chain. Certificate Transparency has an optional, administrator-enabled crt.sh adapter. Live passive DNS and commercial host-intelligence APIs are not bundled; permitted datasets can be ingested through the resumable dataset endpoint. Provider data is never converted into invented hosts or open services.

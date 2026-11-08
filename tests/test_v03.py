@@ -34,7 +34,7 @@ def test_unseen_asn_enriches_and_normalizes_both_forms(system,monkeypatch):
     first=client.get("/api/search",params={"q":"asn:30925"}).json();assert first["enrichment"]["status"]=="enriching"
     wait_for_job(client,first["enrichment"]["id"])
     second=client.get("/api/search",params={"q":"asn:AS30925"}).json()
-    assert second["passive_total"]==2 and any(row["network"]=="203.0.113.0/24" for row in second["passive_intelligence"])
+    assert second["passive_total"]==2 and any(row["prefix"]=="203.0.113.0/24" for row in second["asn_intelligence"]["announced_networks"]["results"])
     assert calls==[("asn","AS30925")]
 
 
