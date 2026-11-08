@@ -6,6 +6,8 @@ const esc = value => String(value ?? "").replace(/[&<>"']/g, char => (
 ));
 let activeQuery = "";
 let csrfToken = sessionStorage.getItem("scanlattice_csrf") || "";
+let enrichmentTimer = null;
+document.querySelector("#page-docs .sectionheader span").textContent = "VERSION 0.3";
 
 function toast(message) {
   const element = $("toast");
@@ -63,7 +65,7 @@ function submitSearch(value) {
 
 $("hero-search").addEventListener("submit", event => {event.preventDefault(); submitSearch($("hero-query").value);});
 $("top-search").addEventListener("submit", event => {event.preventDefault(); submitSearch($("header-query").value);});
-$("admin-scan-action").addEventListener("click", () => {location.hash = "#admin";});
+$("admin-scan-action").addEventListener("click", openDeepRecon);
 
 async function loadStats() {
   try {
@@ -91,6 +93,7 @@ async function search(query, page) {
   $("result-items").innerHTML = '<div class="empty">Loading public index...</div>';
   try {
     const data = await api(`/api/search?q=${encodeURIComponent(query)}&page=${page}&limit=25`);
+    renderEnrichment(data.enrichment, query, page);
     $("search-meta").textContent = `${data.total} indexed observation(s) / ${data.passive_total} passive record(s)`;
     const facets = (id, values, key) => {
       $(id).innerHTML = Object.entries(values).sort((a,b) => b[1]-a[1]).slice(0,10)
@@ -117,6 +120,63 @@ async function search(query, page) {
     $("result-items").innerHTML = `<div class="empty"><strong>Search unavailable</strong>${esc(error.message)}</div>`;
   }
 }
+
+function renderEnrichment(job, query, page) {
+  clearTimeout(enrichmentTimer);
+  const box = $("enrichment-status");
+  if (!job || !job.id) {box.innerHTML = ""; return;}
+  if (job.status === "enriching") {
+    box.innerHTML = '<div class="enrichment-banner"><b>Gathering passive intelligence…</b><span>Results will update automatically.</span></div>';
+    enrichmentTimer = setTimeout(() => pollEnrichment(job.id, query, page), 1500);
+  } else if (job.status === "failed") {
+    box.innerHTML = `<div class="enrichment-banner failed"><b>Passive enrichment failed.</b><span>${esc(job.error || "Providers returned no usable data.")}</span></div>`;
+  } else {
+    box.innerHTML = `<div class="freshness">PASSIVE CACHE: ${esc(job.status.toUpperCase())} · Updated ${esc(job.completed_at || job.updated_at)}</div>`;
+  }
+}
+
+async function pollEnrichment(jobId, query, page) {
+  try {
+    const job = await api(`/api/enrichment/${jobId}`);
+    if (["completed","partial","failed"].includes(job.status)) await search(query, page);
+    else enrichmentTimer = setTimeout(() => pollEnrichment(jobId, query, page), 1500);
+  } catch (error) {
+    $("enrichment-status").innerHTML = `<div class="enrichment-banner failed">${esc(error.message)}</div>`;
+  }
+}
+
+async function openDeepRecon() {
+  try {
+    if (!(await checkSession())) return;
+    const profiles = await api("/api/admin/profiles", {headers:adminHeaders()});
+    $("recon-profile").innerHTML = profiles.profiles.map(profile => `<option value="${profile.id}" ${profile.name === "Quick Recon" ? "selected" : ""}>${esc(profile.name)} — ${profile.ports.length} ports</option>`).join("");
+    $("recon-query").textContent = `Current search: ${activeQuery}`;
+    $("recon-summary").textContent = "Preview validates every candidate against the configured allowlist.";
+    $("recon-candidates").innerHTML = "";
+    $("recon-launch").classList.add("hidden");
+    $("recon-modal").classList.remove("hidden");
+  } catch (error) {toast(error.message);}
+}
+
+$("recon-close").addEventListener("click", () => $("recon-modal").classList.add("hidden"));
+$("recon-preview").addEventListener("click", async () => {
+  try {
+    const preview = await api("/api/admin/deep-recon/preview", {method:"POST",headers:adminHeaders(),body:JSON.stringify({query:activeQuery,profile_id:Number($("recon-profile").value)})});
+    $("recon-summary").innerHTML = `<b>${preview.target_count.toLocaleString()} authorized address(es)</b> · ${preview.estimated_connections.toLocaleString()} estimated connections · ${esc(preview.notice)}`;
+    $("recon-candidates").innerHTML = preview.candidates.map(candidate => `<label class="reconcandidate ${candidate.authorized ? "" : "blocked"}"><input type="checkbox" value="${esc(candidate.target)}" ${candidate.authorized ? "" : "disabled"}><span><b>${esc(candidate.target)}</b><small>${candidate.addresses.toLocaleString()} addresses · ${candidate.authorized ? `${candidate.batches} bounded job(s) · covered by ${esc(candidate.authorization)}` : "NOT AUTHORIZED"}</small></span></label>`).join("") || '<div class="empty">No eligible targets are available yet. Wait for passive enrichment or configure a permitted association.</div>';
+    $("recon-launch").classList.toggle("hidden", !preview.candidates.some(candidate => candidate.authorized));
+  } catch (error) {toast(error.message);}
+});
+$("recon-launch").addEventListener("click", async () => {
+  const targets = [...document.querySelectorAll("#recon-candidates input:checked")].map(input => input.value);
+  if (!targets.length) {toast("Select at least one authorized target."); return;}
+  try {
+    const result = await api("/api/admin/deep-recon/launch", {method:"POST",headers:adminHeaders(),body:JSON.stringify({query:activeQuery,profile_id:Number($("recon-profile").value),targets})});
+    toast(`Campaign created: ${result.job_count} bounded job(s)`);
+    $("recon-modal").classList.add("hidden");
+    location.hash = "#admin";
+  } catch (error) {toast(error.message);}
+});
 
 async function loadHost(ip) {
   if (!ip) return;

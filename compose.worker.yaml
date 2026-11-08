@@ -15,4 +15,4 @@ volumes:
     external: true
     # Matches the standard volume created by the former worker-legacy Compose
     # project so an existing registration.json survives the monorepo switch.
-    name: worker-legacy_worker_state
+    name: worker_worker_state

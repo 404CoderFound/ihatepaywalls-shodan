@@ -1,12 +1,12 @@
-# ScanLattice v0.2
+# ScanLattice v0.3
 
 Open-source network intelligence index with a passive-only FastAPI control plane and separate outbound-connected scanning workers. The interface follows the compact, utilitarian search style of the mid-2010s without using Shodan code or assets.
 
-Public visitors can search indexed observations and cached passive intelligence without authentication. Administrative operations use an HttpOnly, Secure, SameSite=Strict session cookie plus a CSRF token, or the existing `X-Admin-Token` header for automation. Every `/api/admin/*` data-management endpoint performs server-side authorization independently; hiding UI controls is not treated as security.
+Public visitors can search indexed observations and trigger asynchronous, cached passive enrichment without authentication. Exact ASN, IP, CIDR, domain, and hostname queries create a persistent, deduplicated enrichment job and the browser updates automatically. Administrative operations use an HttpOnly, Secure, SameSite=Strict session cookie plus a CSRF token, or the existing `X-Admin-Token` header for automation. Every `/api/admin/*` data-management endpoint performs server-side authorization independently; hiding UI controls is not treated as security.
 
 ## Safety boundary
 
-The web image contains only `app/`; it has no scanner code and never contacts targets. Search reads indexed data only. The worker image contains `worker/` and accepts jobs only when both the control server and worker confirm that the target is inside the job's explicit authorization. Limits default to 4,096 addresses, 100 ports, 50 concurrent sockets per job, bounded timeouts, three lease attempts, TCP connect only, and no authentication, exploitation, stealth, or shell execution.
+The web image contains only `app/`; it has no scanner code and never contacts target application services. It may contact explicitly approved intelligence-provider APIs. The worker image contains `worker/` and accepts jobs only when both the control server and worker confirm that the target is inside the job's explicit authorization. Limits default to 4,096 addresses per ordinary job, 256 addresses per Deep Recon batch, 65,536 addresses per authorized campaign, 100 ports, bounded timeouts and rates, three lease attempts, TCP connect only, and no authentication, exploitation, stealth, or shell execution.
 
 ## Layout
 
@@ -21,7 +21,7 @@ compose.worker.yaml  scanner role only
 .env.worker.example  scanner configuration template
 ```
 
-`worker-legacy/` remains beside this repository as the migration backup. It is not used by either v0.2 Compose file.
+`worker-legacy/` remains beside this repository as the migration backup. It is not used by either v0.3 Compose file.
 
 ## Local tests
 
@@ -29,6 +29,7 @@ compose.worker.yaml  scanner role only
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/pytest -q
+RUN_PROVIDER_INTEGRATION=1 .venv/bin/pytest -q -m integration tests/test_provider_integration.py
 docker compose -f compose.web.yaml config -q
 docker compose -f compose.worker.yaml config -q
 ```
@@ -37,7 +38,7 @@ Tests use only reserved documentation addresses and a loopback TCP fixture; they
 
 ## WebServer installation or upgrade
 
-Back up the named volume before an upgrade. Database migrations are additive and run at startup.
+Back up the named volume before an upgrade. Database migrations are additive and retain v0.2 observations, sessions, workers, jobs, and credentials.
 
 ```bash
 cd /opt
@@ -52,13 +53,16 @@ docker compose -f compose.web.yaml ps
 curl http://127.0.0.1:8080/api/health
 ```
 
-For an existing checkout:
+For the existing WebServer, stop the writer and create a consistent backup before pulling:
 
 ```bash
 cd /opt/scanlattice
-docker compose -f compose.web.yaml down
+docker compose -f compose.web.yaml stop web
+mkdir -p backups
+docker run --rm -v scanlattice_scanlattice_data:/data:ro -v /opt/scanlattice/backups:/backup alpine:3.20 sh -c 'tar -czf /backup/scanlattice-pre-v03-2026-11-08.tgz -C /data .'
 git pull --ff-only
 cp .env.example .env.example.review
+# Add the PASSIVE_ENRICHMENT, queue, campaign and batch variables from .env.example to .env.
 docker compose -f compose.web.yaml up -d --build
 docker compose -f compose.web.yaml logs --tail=100 web
 curl http://127.0.0.1:8080/api/health
@@ -81,10 +85,13 @@ docker compose -f compose.worker.yaml ps
 docker compose -f compose.worker.yaml logs -f worker
 ```
 
-The worker Compose file reuses the standard legacy volume name `worker-legacy_worker_state`, retaining `registration.json` across the monorepo switch. If the old Compose project used a custom project name, inspect `docker volume ls`, copy that registration file securely, or re-enroll once. On first v0.2 enrollment, set `ENROLLMENT_TOKEN` to the WebServer value. After enrollment, rotate the shared enrollment secret at the control plane; each worker uses its own stored credential. Upgrade with:
+The worker Compose file reuses the standard legacy volume name `worker-legacy_worker_state`, retaining `registration.json` across the monorepo switch. If the old Compose project used a custom project name, inspect `docker volume ls`, copy that registration file securely, or re-enroll once. On first enrollment, set `ENROLLMENT_TOKEN` to the WebServer value. After enrollment, rotate the shared enrollment secret at the control plane; each worker uses its own stored credential. Upgrade with:
 
 ```bash
 cd /opt/scanlattice
+docker compose -f compose.worker.yaml stop worker
+mkdir -p backups
+docker run --rm -v worker-legacy_worker_state:/data:ro -v /opt/scanlattice/backups:/backup alpine:3.20 sh -c 'tar -czf /backup/scanner01-state-pre-v03-2026-11-08.tgz -C /data .'
 git pull --ff-only
 docker compose -f compose.worker.yaml up -d --build
 docker compose -f compose.worker.yaml logs --tail=100 worker
@@ -97,7 +104,7 @@ Workers require outbound HTTPS to `https://scanlattice.plezi.eu`; no inbound wor
 1. Log in to `https://scanlattice.plezi.eu/#admin` with `ADMIN_TOKEN`.
 2. Verify Scanner01 is online and advertises `tcp-connect`.
 3. Add a CIDR you own or have written permission to test. Prefer a single host (`x.x.x.x/32`).
-4. Enter that IP as the job target, choose **Conservative**, optionally restrict ports, leave worker selection automatic, and submit.
+4. Search that IP, click **Deep Recon**, choose **Quick Recon**, preview authorization coverage, select the target, and launch.
 5. Observe `queued → assigned → running → completed`. If no worker is online, the job safely remains queued.
 6. Open the completed target from search (`ip:x.x.x.x`). Confirm source `active-scan`, timestamps, service data, history, worker/job identity, and admin progress.
 
@@ -113,11 +120,15 @@ curl -X POST https://scanlattice.plezi.eu/api/admin/import \
 
 CSV uses `POST /api/admin/import/csv?provenance=...` with `Content-Type: text/csv`. Every observation retains its source and timestamp. Demo rows use RFC 5737 addresses, source `example`, and `is_demo=1`.
 
-Passive-only intelligence uses `POST /api/admin/passive/import`. Records can represent an IP, domain, ASN, or network and include their record type, structured value, source, observation time, and optional cache TTL. Provider definitions are managed through `GET/POST /api/admin/passive/providers`; configuration rejects embedded API keys and other secrets. Exact-IP searches may use an explicitly enabled RDAP provider, but only through the fixed HTTPS allowlist (`rdap.org` or RIPE's RDAP service). Results are cached for 24 hours, empty/error responses for five minutes, and per-provider request quotas are enforced. No request is made to the searched host itself. Passive DNS and Certificate Transparency definitions currently consume imported/cached data only.
+Passive-only intelligence uses `POST /api/admin/passive/import`. Records can represent an IP, domain, ASN, or network and include their record type, structured value, source, observation time, and optional cache TTL. Provider definitions are managed through `GET/POST/PUT /api/admin/passive/providers`; configuration rejects embedded API keys and other secrets.
+
+Built-in enrichment uses RIPEstat for ASN overview, announced prefixes, IP routing and CIDR prefix overview, and RDAP bootstrap for IP/network registration and domain registration. Results cache for 24 hours; failed jobs cool down for five minutes. The persistent queue deduplicates a canonical query such as `asn:30925` and `asn:AS30925`, limits retries, bounds outstanding work, and preserves partial provider success.
+
+RIPEstat requires attribution and its service terms restrict redistribution and commercial use. Review the current RIPE NCC terms before public or commercial deployment and disable the provider through the authenticated provider API if your use is not permitted. Certificate Transparency can be enabled as a cached crt.sh provider; passive DNS currently uses imported provider data. Direct DNS is not presented as passive DNS.
 
 ## Search
 
-Supported filters: `port`, `asn`, `country`, `org`, `product`, `service`, `ip`, `net`, `source`, `hostname`, and `domain`. Filters combine with AND, quoted values work, pagination is stable, and malformed/unknown filters return HTTP 400. Results separate historical **Indexed Observations** from **Passive Intelligence**. Public search and host endpoints are rate-limited per client IP and never enqueue work or import worker modules.
+Supported filters: `port`, `asn`, `country`, `org`, `product`, `service`, `ip`, `net`, `source`, `hostname`, and `domain`. `asn:30925` and `asn:AS30925` normalize identically. Filters combine with AND, quoted values work, pagination is stable, and malformed/unknown filters return HTTP 400. Results separate historical **Indexed Service Observations** from **Passive Intelligence**. Search may enqueue passive-provider work but never an active scan or worker module.
 
 ## GitHub publishing
 
@@ -127,10 +138,10 @@ Do not commit `.env`, `.env.worker`, SQLite files, `.venv`, caches, or worker re
 cd /opt/scanlattice
 git status --short
 git add app worker tests compose.web.yaml compose.worker.yaml Dockerfile requirements.txt README.md .env.example .env.worker.example .gitignore pytest.ini
-git commit -m "Implement ScanLattice v0.2 control plane and workers"
+git commit -m "Implement ScanLattice v0.3 passive discovery and Deep Recon"
 git push origin main
 ```
 
 ## Current limitations
 
-SQLite and in-process scheduling are appropriate for v0.2 but should move behind PostgreSQL plus a dedicated scheduler before high-volume deployment. TLS collection currently records protocol, cipher, and SHA-256 certificate fingerprint rather than a complete parsed certificate chain. ASN, organization, country, reverse DNS and public DNS data must arrive from documented imports; no third-party provider is bundled or fabricated.
+SQLite and the persistent in-process enrichment executor are appropriate for v0.3 but should move behind PostgreSQL plus a dedicated queue before high-volume or multi-control-plane deployment. TLS collection currently records protocol, cipher, and SHA-256 certificate fingerprint rather than a complete parsed certificate chain. Certificate Transparency has an optional, administrator-enabled crt.sh JSON adapter with bounded parsing and caching. Live passive DNS is not bundled and requires attributed imports or a future permitted provider integration. Provider data is best-effort and is never converted into invented hosts or open services.

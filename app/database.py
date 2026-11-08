@@ -126,6 +126,25 @@ def init_db(seed_demo: bool = False) -> None:
           provider_id INTEGER NOT NULL, subject TEXT NOT NULL, expires_at INTEGER NOT NULL,
           PRIMARY KEY(provider_id,subject), FOREIGN KEY(provider_id) REFERENCES passive_providers(id)
         );
+        CREATE TABLE IF NOT EXISTS enrichment_jobs (
+          id TEXT PRIMARY KEY, query_key TEXT NOT NULL UNIQUE, query_type TEXT NOT NULL,
+          query_value TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+          max_attempts INTEGER NOT NULL DEFAULT 3, providers_total INTEGER NOT NULL DEFAULT 0,
+          providers_completed INTEGER NOT NULL DEFAULT 0, records_added INTEGER NOT NULL DEFAULT 0,
+          error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          started_at TEXT, completed_at TEXT, cache_expires_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_enrichment_status ON enrichment_jobs(status,updated_at);
+        CREATE TABLE IF NOT EXISTS scan_campaigns (
+          id TEXT PRIMARY KEY, source_query TEXT NOT NULL, profile_id INTEGER NOT NULL,
+          status TEXT NOT NULL, target_count INTEGER NOT NULL, job_count INTEGER NOT NULL,
+          created_at TEXT NOT NULL, FOREIGN KEY(profile_id) REFERENCES scan_profiles(id)
+        );
+        CREATE TABLE IF NOT EXISTS campaign_jobs (
+          campaign_id TEXT NOT NULL, job_id TEXT NOT NULL UNIQUE,
+          PRIMARY KEY(campaign_id,job_id), FOREIGN KEY(campaign_id) REFERENCES scan_campaigns(id),
+          FOREIGN KEY(job_id) REFERENCES scan_jobs(id)
+        );
         """)
         _add_columns(db, "observations", {
             "hostname": "TEXT NOT NULL DEFAULT ''", "service": "TEXT NOT NULL DEFAULT ''",
@@ -137,6 +156,9 @@ def init_db(seed_demo: bool = False) -> None:
             "version": "TEXT NOT NULL DEFAULT ''", "max_concurrent": "INTEGER NOT NULL DEFAULT 1",
             "completed_jobs": "INTEGER NOT NULL DEFAULT 0", "last_error": "TEXT NOT NULL DEFAULT ''"
         })
+        _add_columns(db, "scan_profiles", {
+            "rate_per_second": "REAL NOT NULL DEFAULT 20"
+        })
         if db.execute("SELECT COUNT(*) FROM scan_profiles").fetchone()[0] == 0:
             now = utc_now()
             db.executemany("INSERT INTO scan_profiles(name,ports,connect_timeout,banner_timeout,max_concurrency,created_at) VALUES(?,?,?,?,?,?)", [
@@ -144,6 +166,19 @@ def init_db(seed_demo: bool = False) -> None:
                 ("Common services", "21,22,25,53,80,110,143,443,587,993,995,3306,5432,6379,8080,8443", 3, 3, 20, now),
                 ("Conservative", "22,80,443", 4, 3, 10, now),
             ])
+        now = utc_now()
+        profile_defaults = [
+            ("Quick Recon", "22,80,443,8080,8443", 2, 2, 20, 30, now),
+            ("Standard Recon", "21,22,25,53,80,110,143,443,587,993,995,3306,5432,6379,8080,8443", 3, 3, 20, 20, now),
+            ("Deep Recon", "21,22,23,25,53,80,110,111,135,139,143,389,443,445,465,587,636,993,995,1433,1521,2049,2375,3306,3389,5432,5672,5900,6379,8080,8443,9200,27017", 4, 4, 20, 10, now),
+        ]
+        db.executemany("INSERT OR IGNORE INTO scan_profiles(name,ports,connect_timeout,banner_timeout,max_concurrency,rate_per_second,created_at) VALUES(?,?,?,?,?,?,?)", profile_defaults)
+        provider_defaults = [
+            ("RIPEstat", "ripestat", 1, "{}", 10, now, now),
+            ("RDAP Bootstrap", "rdap", 1, '{"base_url":"https://rdap.org/"}', 10, now, now),
+            ("crt.sh Certificate Transparency", "certificate_transparency", 0, "{}", 5, now, now),
+        ]
+        db.executemany("INSERT OR IGNORE INTO passive_providers(name,provider_type,enabled,config_json,requests_per_minute,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", provider_defaults)
         if seed_demo and db.execute("SELECT COUNT(*) FROM observations WHERE is_demo=1").fetchone()[0] == 0:
             now = utc_now()
             samples = [

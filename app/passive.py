@@ -9,7 +9,7 @@ from typing import Any
 
 from .search import ParsedQuery
 
-APPROVED_RDAP_BASES = {"https://rdap.org/ip/", "https://rdap.db.ripe.net/ip/"}
+APPROVED_RDAP_BASES = {"https://rdap.org/", "https://rdap.org/ip/", "https://rdap.db.ripe.net/ip/"}
 
 
 def _contains(network: str, address: str) -> bool:

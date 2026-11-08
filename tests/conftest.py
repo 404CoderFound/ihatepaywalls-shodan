@@ -10,7 +10,7 @@ def system(tmp_path,monkeypatch):
     import app.database as database
     monkeypatch.setattr(database,"DB_PATH",tmp_path/"test.db")
     import app.main as main
-    main.ADMIN_TOKEN="admin-test-token";main.ENROLLMENT_TOKEN="enroll-test-token";main.OFFLINE=45;main.LEASE=90;main.COOKIE_SECURE=False;main.PUBLIC_RATE_LIMIT=60;main.RATE_LIMITER.clear()
+    main.ADMIN_TOKEN="admin-test-token";main.ENROLLMENT_TOKEN="enroll-test-token";main.OFFLINE=45;main.LEASE=90;main.COOKIE_SECURE=False;main.PUBLIC_RATE_LIMIT=60;main.ENRICHMENT_ENABLED=False;main.RATE_LIMITER.clear()
     with TestClient(main.app) as client:yield client,main,database
 
 @pytest.fixture

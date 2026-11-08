@@ -48,6 +48,11 @@ def parse_query(text: str) -> ParsedQuery:
         elif key == "net":
             try: ipaddress.ip_network(value, strict=False)
             except ValueError as exc: raise QueryError("Invalid CIDR network") from exc
+        elif key == "asn":
+            number = value.upper().removeprefix("AS")
+            if not number.isdigit() or int(number) < 0 or int(number) > 4294967295:
+                raise QueryError("Invalid ASN")
+            value = f"AS{int(number)}"
         filters.setdefault(key, []).append(value)
     return ParsedQuery(filters, free)
 

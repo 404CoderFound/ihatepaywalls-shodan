@@ -1,5 +1,6 @@
 import ast
 import socket
+import time
 import urllib.request
 from pathlib import Path
 
@@ -57,7 +58,8 @@ def test_no_passive_provider_result_is_fabricated(system):
 
 
 def test_approved_rdap_provider_is_cached_without_contacting_target(system,admin_headers,monkeypatch):
-    client,_,_=system
+    client,main,database=system;main.ENRICHMENT_ENABLED=True
+    with database.connection() as db:db.execute("UPDATE passive_providers SET enabled=0")
     created=client.post("/api/admin/passive/providers",headers=admin_headers,json={"name":"approved-rdap","provider_type":"rdap","enabled":True,"config":{"base_url":"https://rdap.org/ip/"},"requests_per_minute":2})
     assert created.status_code==200
     calls=[]
@@ -69,8 +71,12 @@ def test_approved_rdap_provider_is_cached_without_contacting_target(system,admin
         calls.append(request.full_url);assert request.full_url=="https://rdap.org/ip/203.0.113.9";return Response()
     monkeypatch.setattr(urllib.request,"urlopen",provider_call)
     first=client.get("/api/search",params={"q":"ip:203.0.113.9"}).json()
+    assert first["passive_total"]==0 and first["enrichment"]["status"]=="enriching"
+    for _ in range(50):
+        status=client.get(f'/api/enrichment/{first["enrichment"]["id"]}').json()
+        if status["status"] in {"completed","partial","failed"}:break
+        time.sleep(.01)
     second=client.get("/api/search",params={"q":"ip:203.0.113.9"}).json()
-    assert first["passive_total"]==1 and first["enrichment"]["live_lookup_attempted"] is True
     assert second["passive_total"]==1 and calls==["https://rdap.org/ip/203.0.113.9"]
 
 

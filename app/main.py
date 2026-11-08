@@ -1,7 +1,7 @@
 """ScanLattice control plane. Active network operations are intentionally absent."""
 from __future__ import annotations
 
-import csv, hashlib, hmac, io, ipaddress, json, os, secrets, time, uuid
+import csv, hashlib, hmac, io, ipaddress, json, math, os, secrets, time, uuid
 from pathlib import Path
 from typing import Annotated, Any
 from fastapi import Body, FastAPI, Header, HTTPException, Query, Request, Response
@@ -11,7 +11,8 @@ from pydantic import BaseModel, Field
 from starlette.datastructures import Headers
 from .database import connection, init_db, utc_now
 from .search import QueryError, build_sql, parse_query
-from .passive import APPROVED_RDAP_BASES, enrich_from_approved_provider, provider_status, search_cached
+from .passive import APPROVED_RDAP_BASES, provider_status, search_cached
+from .enrichment import enrichment_target, ensure_enrichment, queue_job, recover_pending
 from .rate_limit import FixedWindowLimiter
 
 ROOT=Path(__file__).resolve().parent
@@ -21,8 +22,11 @@ OFFLINE=int(os.getenv("WORKER_OFFLINE_SECONDS","45")); LEASE=int(os.getenv("JOB_
 MAX_TARGETS=int(os.getenv("MAX_JOB_TARGETS","4096")); MAX_PORTS=int(os.getenv("MAX_JOB_PORTS","100"))
 PUBLIC_RATE_LIMIT=int(os.getenv("PUBLIC_RATE_LIMIT","60")); LOGIN_RATE_LIMIT=int(os.getenv("LOGIN_RATE_LIMIT","5"))
 SESSION_SECONDS=int(os.getenv("ADMIN_SESSION_SECONDS","28800")); COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE","true").lower()=="true"
+ENRICHMENT_ENABLED=os.getenv("PASSIVE_ENRICHMENT_ENABLED","true").lower()=="true"
+MAX_ENRICHMENT_QUEUE=int(os.getenv("MAX_ENRICHMENT_QUEUE","100"))
+MAX_CAMPAIGN_TARGETS=int(os.getenv("MAX_CAMPAIGN_TARGETS","65536"));MAX_BATCH_TARGETS=int(os.getenv("MAX_BATCH_TARGETS","256"))
 RATE_LIMITER=FixedWindowLimiter()
-app=FastAPI(title="ScanLattice API",version="0.2.0",docs_url=None,redoc_url=None)
+app=FastAPI(title="ScanLattice API",version="0.3.0",docs_url=None,redoc_url=None)
 app.mount("/static",StaticFiles(directory=ROOT/"static"),name="static")
 
 @app.middleware("http")
@@ -30,7 +34,7 @@ async def bounded(request:Request,call_next):
     if int(request.headers.get("content-length","0"))>int(os.getenv("MAX_BODY_BYTES",str(2*1024*1024))):
         return JSONResponse({"detail":"Request body too large"},413)
     identity=request.client.host if request.client else "unknown"
-    public_path=request.url.path=="/api/search" or request.url.path.startswith("/api/hosts/")
+    public_path=request.url.path=="/api/search" or request.url.path.startswith("/api/hosts/") or request.url.path.startswith("/api/enrichment/")
     if public_path:
         allowed,remaining=RATE_LIMITER.allow("public",identity,PUBLIC_RATE_LIMIT)
         if not allowed:return JSONResponse({"detail":"Public API rate limit exceeded"},429,headers={"Retry-After":"60","X-RateLimit-Remaining":"0"})
@@ -72,11 +76,11 @@ def audit(db,action:str,details:dict,actor="admin"):
     db.execute("INSERT INTO audit_logs(action,actor,details,created_at) VALUES(?,?,?,?)",(action,actor,json.dumps(details),utc_now()))
 
 @app.on_event("startup")
-def startup():init_db(SEED_DEMO)
+def startup():init_db(SEED_DEMO);recover_pending() if ENRICHMENT_ENABLED else None
 @app.get("/")
 def home():return FileResponse(ROOT/"static"/"index.html")
 @app.get("/api/health")
-def health():return {"status":"ok","role":"control-plane","active_scanning":False,"version":"0.2.0"}
+def health():return {"status":"ok","role":"control-plane","active_scanning":False,"passive_enrichment":ENRICHMENT_ENABLED,"version":"0.3.0"}
 @app.get("/api/stats")
 def stats():
     with connection() as db:return {"observations":db.execute("SELECT COUNT(*) FROM observations").fetchone()[0],"services":db.execute("SELECT COUNT(*) FROM services").fetchone()[0],"hosts":db.execute("SELECT COUNT(*) FROM (SELECT ip FROM hosts UNION SELECT ip FROM passive_records WHERE ip!='')").fetchone()[0],"passive_records":db.execute("SELECT COUNT(*) FROM passive_records").fetchone()[0],"workers_online":db.execute("SELECT COUNT(*) FROM workers WHERE last_seen>?",(int(time.time())-OFFLINE,)).fetchone()[0],"demo_enabled":SEED_DEMO}
@@ -86,18 +90,26 @@ def search(q:str=Query("",max_length=500),page:int=Query(1,ge=1),limit:int=Query
     try: parsed=parse_query(q)
     except QueryError as exc:raise HTTPException(400,str(exc)) from exc
     where,params,nets=build_sql(parsed)
+    should_queue=False;enrichment_job=None
     with connection() as db:
         rows=[dict(r) for r in db.execute("SELECT o.* FROM observations o"+where+" ORDER BY o.seen_at DESC,o.id DESC",params)]
         passive=search_cached(db,parsed)
-        enrichment=enrich_from_approved_provider(db,parsed) if not rows and not passive else provider_status(db)
-        if enrichment.get("live_lookup_attempted"):passive=search_cached(db,parsed)
+        enrichment_job,should_queue=ensure_enrichment(db,parsed,ENRICHMENT_ENABLED,MAX_ENRICHMENT_QUEUE)
+        enrichment=provider_status(db)
+    if should_queue and enrichment_job:queue_job(enrichment_job["id"])
     if nets:rows=[r for r in rows if all(ipaddress.ip_address(r["ip"]) in n for n in nets)]
     facets={"ports":{},"countries":{},"products":{}}
     for r in rows:
         for name,value in (("ports",str(r["port"])),("countries",r["country"] or "Unknown"),("products",r["product"] or "Unknown")):facets[name][value]=facets[name].get(value,0)+1
     total=len(rows); start=(page-1)*limit
     passive_start=(page-1)*limit
-    return {"query":q,"page":page,"limit":limit,"pages":max(1,(max(total,len(passive))+limit-1)//limit),"total":total,"passive_total":len(passive),"results":rows[start:start+limit],"indexed_observations":rows[start:start+limit],"passive_intelligence":passive[passive_start:passive_start+limit],"has_information":bool(rows or passive),"message":None if rows or passive else "No indexed or passive information available.","enrichment":enrichment,"facets":facets}
+    return {"query":q,"page":page,"limit":limit,"pages":max(1,(max(total,len(passive))+limit-1)//limit),"total":total,"passive_total":len(passive),"results":rows[start:start+limit],"indexed_observations":rows[start:start+limit],"passive_intelligence":passive[passive_start:passive_start+limit],"has_information":bool(rows or passive),"message":None if rows or passive else "No indexed or passive information available.","enrichment":dict(enrichment_job) if enrichment_job else enrichment,"facets":facets}
+
+@app.get("/api/enrichment/{job_id}")
+def enrichment_status(job_id:str):
+    with connection() as db:job=db.execute("SELECT * FROM enrichment_jobs WHERE id=?",(job_id,)).fetchone()
+    if job is None:raise HTTPException(404,"Enrichment job not found")
+    return dict(job)
 
 @app.get("/api/hosts/{ip}")
 def host(ip:str):
@@ -112,7 +124,7 @@ def host(ip:str):
     return {"host":dict(h) if h else {"ip":ip,"last_scan_at":""},"services":rows,"latest_by_port":list(latest.values()),"passive_intelligence":passive}
 
 @app.get("/api/docs")
-def docs():return {"version":"0.2.0","authentication":{"public":"none","admin_browser":"HttpOnly session cookie plus X-CSRF-Token for mutations","admin_api":"X-Admin-Token","worker":"X-Worker-Token"},"search_examples":["port:443","asn:AS30925","country:NL",'org:"Example Organization"',"domain:example.org","service:ssh","net:192.0.2.0/24"],"endpoints":["GET /api/search","GET /api/hosts/{ip}","GET /api/stats","POST /api/admin/session","POST /api/admin/jobs","POST /api/admin/import","POST /api/admin/passive/import"]}
+def docs():return {"version":"0.3.0","authentication":{"public":"none","admin_browser":"HttpOnly session cookie plus X-CSRF-Token for mutations","admin_api":"X-Admin-Token","worker":"X-Worker-Token"},"search_examples":["port:443","asn:30925","asn:AS30925","country:NL",'org:"Example Organization"',"domain:example.org","service:ssh","net:192.0.2.0/24"],"endpoints":["GET /api/search","GET /api/enrichment/{id}","GET /api/hosts/{ip}","GET /api/stats","POST /api/admin/session","POST /api/admin/deep-recon/preview","POST /api/admin/deep-recon/launch","POST /api/admin/jobs","POST /api/admin/import","POST /api/admin/passive/import"]}
 
 class SessionLogin(BaseModel):
     admin_token:str=Field(min_length=1,max_length=500)
@@ -179,7 +191,7 @@ def heartbeat(p:Heartbeat,x_worker_token:Annotated[str|None,Header()]=None):
 @app.post("/api/worker/jobs/claim")
 def claim(x_worker_token:Annotated[str|None,Header()]=None):
     with connection() as db:
-        w=worker(db,x_worker_token);schedule(db);rows=[dict(r) for r in db.execute("SELECT j.*,p.connect_timeout,p.banner_timeout,p.max_concurrency,a.cidr authorization_cidr FROM scan_jobs j JOIN scan_profiles p ON p.id=j.profile_id JOIN authorizations a ON a.id=j.authorization_id WHERE j.assigned_worker_id=? AND j.status='assigned' ORDER BY j.created_at LIMIT ?",(w["id"],w["max_concurrent"]))]
+        w=worker(db,x_worker_token);schedule(db);rows=[dict(r) for r in db.execute("SELECT j.*,p.connect_timeout,p.banner_timeout,p.max_concurrency,p.rate_per_second,a.cidr authorization_cidr FROM scan_jobs j JOIN scan_profiles p ON p.id=j.profile_id JOIN authorizations a ON a.id=j.authorization_id WHERE j.assigned_worker_id=? AND j.status='assigned' ORDER BY j.created_at LIMIT ?",(w["id"],w["max_concurrent"]))]
     for r in rows:r["ports"]=json.loads(r["ports"])
     return {"jobs":rows}
 
@@ -228,9 +240,13 @@ class PassiveImport(BaseModel):
 
 class ProviderCreate(BaseModel):
     name:str=Field(min_length=2,max_length=100)
-    provider_type:str=Field(pattern="^(import|rdap|passive_dns|certificate_transparency)$")
+    provider_type:str=Field(pattern="^(import|ripestat|rdap|passive_dns|certificate_transparency)$")
     enabled:bool=False
     config:dict[str,Any]=Field(default_factory=dict)
+    requests_per_minute:int=Field(default=10,ge=1,le=120)
+
+class ProviderUpdate(BaseModel):
+    enabled:bool
     requests_per_minute:int=Field(default=10,ge=1,le=120)
 
 class ProfileCreate(BaseModel):
@@ -239,6 +255,7 @@ class ProfileCreate(BaseModel):
     connect_timeout:float=Field(default=3,ge=.2,le=15)
     banner_timeout:float=Field(default=3,ge=.2,le=15)
     max_concurrency:int=Field(default=20,ge=1,le=50)
+    rate_per_second:float=Field(default=20,ge=.1,le=1000)
 
 def store(db,rows:list[Observation],source:str,jid=None,wid=None):
     now=utc_now()
@@ -319,6 +336,14 @@ def create_provider(p:ProviderCreate,x_admin_token:Annotated[str|None,Header()]=
         audit(db,"passive.provider_created",{"provider_id":cursor.lastrowid,"type":p.provider_type,"enabled":p.enabled})
     return {"id":cursor.lastrowid,"name":p.name,"provider_type":p.provider_type,"enabled":p.enabled}
 
+@app.put("/api/admin/passive/providers/{provider_id}")
+def update_provider(provider_id:int,p:ProviderUpdate,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:
+        if db.execute("SELECT 1 FROM passive_providers WHERE id=?",(provider_id,)).fetchone() is None:raise HTTPException(404,"Provider not found")
+        db.execute("UPDATE passive_providers SET enabled=?,requests_per_minute=?,updated_at=? WHERE id=?",(int(p.enabled),p.requests_per_minute,utc_now(),provider_id));audit(db,"passive.provider_updated",{"provider_id":provider_id,"enabled":p.enabled,"requests_per_minute":p.requests_per_minute})
+    return {"id":provider_id,"enabled":p.enabled,"requests_per_minute":p.requests_per_minute}
+
 class AuthCreate(BaseModel):name:str=Field(min_length=2,max_length=100);cidr:str
 @app.post("/api/admin/authorizations")
 def create_auth(p:AuthCreate,x_admin_token:Annotated[str|None,Header()]=None):
@@ -354,12 +379,20 @@ def create_profile(p:ProfileCreate,x_admin_token:Annotated[str|None,Header()]=No
     admin(x_admin_token);ports=sorted(set(p.ports))
     if any(not 1<=port<=65535 for port in ports):raise HTTPException(400,"Profile contains an invalid port")
     with connection() as db:
-        try:cursor=db.execute("INSERT INTO scan_profiles(name,ports,connect_timeout,banner_timeout,max_concurrency,created_at) VALUES(?,?,?,?,?,?)",(p.name,",".join(map(str,ports)),p.connect_timeout,p.banner_timeout,p.max_concurrency,utc_now()))
+        try:cursor=db.execute("INSERT INTO scan_profiles(name,ports,connect_timeout,banner_timeout,max_concurrency,rate_per_second,created_at) VALUES(?,?,?,?,?,?,?)",(p.name,",".join(map(str,ports)),p.connect_timeout,p.banner_timeout,p.max_concurrency,p.rate_per_second,utc_now()))
         except Exception as exc:raise HTTPException(409,"Profile name already exists") from exc
         audit(db,"profile.created",{"profile_id":cursor.lastrowid,"name":p.name,"ports":ports})
     return {"id":cursor.lastrowid,"name":p.name,"ports":ports}
 
 class JobCreate(BaseModel):target:str;profile_id:int;ports:list[int]|None=None;worker_id:str|None=None
+
+class DeepReconPreview(BaseModel):
+    query:str=Field(min_length=1,max_length=500)
+    profile_id:int
+    ports:list[int]|None=None
+
+class DeepReconLaunch(DeepReconPreview):
+    targets:list[str]=Field(min_length=1,max_length=500)
 @app.post("/api/admin/jobs")
 def create_job(p:JobCreate,x_admin_token:Annotated[str|None,Header()]=None):
     admin(x_admin_token)
@@ -376,6 +409,70 @@ def create_job(p:JobCreate,x_admin_token:Annotated[str|None,Header()]=None):
         if p.worker_id and db.execute("SELECT 1 FROM workers WHERE id=?",(p.worker_id,)).fetchone() is None:raise HTTPException(404,"Worker not found")
         jid=str(uuid.uuid4());now=utc_now();db.execute("INSERT INTO scan_jobs(id,target,authorization_id,profile_id,ports,requested_worker_id,status,progress_total,created_at,updated_at) VALUES(?,?,?,?,?,?,'queued',?,?,?)",(jid,str(target),auth["id"],profile["id"],json.dumps(ports),p.worker_id,int(target.num_addresses)*len(ports),now,now));audit(db,"job.created",{"job_id":jid,"target":str(target),"ports":ports});schedule(db);job=dict(db.execute("SELECT * FROM scan_jobs WHERE id=?",(jid,)).fetchone())
     job["ports"]=ports;job.pop("lease_token",None);return job
+
+def _deep_candidates(db,query:str)->tuple[str,list[str]]:
+    try:parsed=parse_query(query)
+    except QueryError as exc:raise HTTPException(400,str(exc)) from exc
+    target=enrichment_target(parsed)
+    if target is None:raise HTTPException(400,"Deep Recon requires one IP, CIDR, ASN, domain or hostname")
+    kind,value=target
+    if kind=="ip":return kind,[str(ipaddress.ip_network(value,strict=False))]
+    if kind=="net":return kind,[str(ipaddress.ip_network(value,strict=False))]
+    if kind=="asn":
+        rows=db.execute("SELECT DISTINCT network FROM passive_records WHERE asn=? AND record_type='announced-prefix' AND network!='' ORDER BY network",(value.upper(),)).fetchall()
+        return kind,[row[0] for row in rows]
+    rows=db.execute("SELECT DISTINCT ip FROM passive_records WHERE domain=? AND ip!='' ORDER BY ip",(value.lower(),)).fetchall()
+    return kind,[str(ipaddress.ip_network(row[0],strict=False)) for row in rows]
+
+def _authorization_for(db,network):
+    return next((row for row in db.execute("SELECT * FROM authorizations WHERE enabled=1") if network.subnet_of(ipaddress.ip_network(row["cidr"]))),None)
+
+def _campaign_ports(profile,requested):
+    ports=sorted(set(requested if requested is not None else [int(x) for x in profile["ports"].split(",")]))
+    if not ports or len(ports)>MAX_PORTS or any(not 1<=p<=65535 for p in ports):raise HTTPException(400,"Invalid or excessive port selection")
+    return ports
+
+def _split_network(network):
+    if network.num_addresses<=MAX_BATCH_TARGETS:return [network]
+    extra=math.ceil(math.log2(network.num_addresses/MAX_BATCH_TARGETS));prefix=min(network.max_prefixlen,network.prefixlen+extra)
+    return list(network.subnets(new_prefix=prefix))
+
+@app.post("/api/admin/deep-recon/preview")
+def deep_recon_preview(p:DeepReconPreview,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:
+        profile=db.execute("SELECT * FROM scan_profiles WHERE id=?",(p.profile_id,)).fetchone()
+        if profile is None:raise HTTPException(404,"Scan profile not found")
+        ports=_campaign_ports(profile,p.ports);kind,candidates=_deep_candidates(db,p.query);items=[]
+        for value in candidates:
+            network=ipaddress.ip_network(value,strict=False);authorization=_authorization_for(db,network)
+            items.append({"target":str(network),"addresses":int(network.num_addresses),"authorized":authorization is not None,"authorization":authorization["cidr"] if authorization else None,"batches":len(_split_network(network)) if authorization and network.num_addresses<=MAX_CAMPAIGN_TARGETS else 0})
+    return {"query":p.query,"query_type":kind,"profile":{"id":profile["id"],"name":profile["name"],"ports":ports,"rate_per_second":profile["rate_per_second"]},"candidates":items,"target_count":sum(item["addresses"] for item in items if item["authorized"]),"estimated_connections":sum(item["addresses"] for item in items if item["authorized"])*len(ports),"notice":"Only explicitly authorized candidates may be selected. ASN prefixes are never automatically authorized."}
+
+@app.post("/api/admin/deep-recon/launch")
+def deep_recon_launch(p:DeepReconLaunch,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token);campaign_id=str(uuid.uuid4());now=utc_now()
+    with connection() as db:
+        profile=db.execute("SELECT * FROM scan_profiles WHERE id=?",(p.profile_id,)).fetchone()
+        if profile is None:raise HTTPException(404,"Scan profile not found")
+        ports=_campaign_ports(profile,p.ports);allowed_kind,available=_deep_candidates(db,p.query);available_networks={str(ipaddress.ip_network(x,strict=False)) for x in available}
+        selected=[ipaddress.ip_network(x,strict=False) for x in p.targets]
+        if any(str(network) not in available_networks for network in selected):raise HTTPException(400,"Selected target was not derived from the current search result")
+        total=sum(int(network.num_addresses) for network in selected)
+        if total>MAX_CAMPAIGN_TARGETS:raise HTTPException(400,f"Campaign exceeds maximum of {MAX_CAMPAIGN_TARGETS} addresses")
+        batches=[]
+        for network in selected:
+            authorization=_authorization_for(db,network)
+            if authorization is None:raise HTTPException(403,f"Target {network} is outside enabled authorizations")
+            batches.extend((batch,authorization) for batch in _split_network(network))
+        db.execute("INSERT INTO scan_campaigns(id,source_query,profile_id,status,target_count,job_count,created_at) VALUES(?,?,?,'queued',?,?,?)",(campaign_id,p.query,profile["id"],total,len(batches),now))
+        job_ids=[]
+        for batch,authorization in batches:
+            job_id=str(uuid.uuid4());job_ids.append(job_id)
+            db.execute("INSERT INTO scan_jobs(id,target,authorization_id,profile_id,ports,status,progress_total,created_at,updated_at) VALUES(?,?,?,?,?,'queued',?,?,?)",(job_id,str(batch),authorization["id"],profile["id"],json.dumps(ports),int(batch.num_addresses)*len(ports),now,now))
+            db.execute("INSERT INTO campaign_jobs(campaign_id,job_id) VALUES(?,?)",(campaign_id,job_id))
+        audit(db,"deep_recon.launched",{"campaign_id":campaign_id,"query":p.query,"jobs":len(job_ids),"addresses":total});schedule(db)
+    return {"campaign_id":campaign_id,"status":"queued","job_ids":job_ids,"job_count":len(job_ids),"target_count":total,"query_type":allowed_kind}
 @app.get("/api/admin/jobs")
 def jobs(x_admin_token:Annotated[str|None,Header()]=None):
     admin(x_admin_token)
