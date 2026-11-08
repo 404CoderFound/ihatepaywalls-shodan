@@ -1,43 +1,184 @@
 "use strict";
+
 const $ = id => document.getElementById(id);
+const esc = value => String(value ?? "").replace(/[&<>"']/g, char => (
+  {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]
+));
 let activeQuery = "";
-const escapeHtml = s => String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-function toast(s) {const e=$('toast');e.textContent=s;e.classList.add('visible');setTimeout(()=>e.classList.remove('visible'),4500)}
-function route(){
-  const hash=location.hash.slice(1), [path, queryPart]=hash.split('?');
-  const page=['home','search','admin'].includes(path)?path:'home';
-  document.querySelectorAll('.page').forEach(p=>p.classList.toggle('hidden',p.id!==`page-${page}`));
-  document.querySelectorAll('[data-page]').forEach(a=>a.classList.toggle('active',a.dataset.page===page));
-  if(page==='search'){const q=new URLSearchParams(queryPart||'').get('q')||activeQuery; activeQuery=q;$('header-query').value=q;search(q)}
-  if(page==='admin'&&sessionStorage.getItem('scanlattice_admin')) { $('admin-token').value=sessionStorage.getItem('scanlattice_admin');loadAdmin(); }
+let csrfToken = sessionStorage.getItem("scanlattice_csrf") || "";
+
+function toast(message) {
+  const element = $("toast");
+  element.textContent = message;
+  element.classList.add("visible");
+  setTimeout(() => element.classList.remove("visible"), 4500);
 }
-function submitSearch(s){activeQuery=s.trim();location.hash='#search?q='+encodeURIComponent(activeQuery);route()}
-$('hero-search').addEventListener('submit',e=>{e.preventDefault();submitSearch($('hero-query').value)});
-$('top-search').addEventListener('submit',e=>{e.preventDefault();submitSearch($('header-query').value)});
-$('scan-query').addEventListener('click',()=>toast('On-demand scans are not enabled in this starter build. No target was contacted.'));
-async function search(q){
-  $('result-query').textContent=q?`/ ${q}`:'';$('result-items').innerHTML='<div class="empty">Loading index...</div>';
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {credentials: "same-origin", ...options});
+  const data = await response.json();
+  if (!response.ok) throw Error(data.detail || "Request failed");
+  return data;
+}
+
+function adminHeaders() {
+  return {"Content-Type": "application/json", "X-CSRF-Token": csrfToken};
+}
+
+async function checkSession() {
   try {
-    const res=await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=100`);const json=await res.json();
-    if(!res.ok)throw Error(json.detail||'Search failed');
-    $('search-meta').textContent=`${json.total.toLocaleString()} indexed observation${json.total===1?'':'s'}`;
-    const facets=(el,data,key)=>{const entries=Object.entries(data).sort((a,b)=>b[1]-a[1]); $(el).innerHTML=entries.length?entries.map(([v,n])=>`<div><a href="#search?q=${encodeURIComponent(key+':'+v)}">${escapeHtml(v)}</a><span>${n}</span></div>`).join(''):'<div>No data yet</div>'};
-    facets('facet-ports',json.facets.ports,'port');facets('facet-countries',json.facets.countries,'country');
-    $('result-items').innerHTML=json.results.length?json.results.map(x=>`<article class="observation">
-      <h3><a href="#search?q=${encodeURIComponent('ip:'+x.ip)}">${escapeHtml(x.ip)}</a></h3><div class="org">${escapeHtml(x.org||'Unknown organization')}</div>
-      <div class="meta">${escapeHtml(x.country||'Unknown country')} &nbsp; · &nbsp; ${escapeHtml(x.asn)} &nbsp; · &nbsp; Last observed: ${escapeHtml(x.seen_at)} &nbsp; · &nbsp; Source: ${escapeHtml(x.source)}${x.is_demo?' &nbsp; · &nbsp; DEMO DATA':''}</div>
-      <div><span class="service">${escapeHtml(x.port)}/${escapeHtml(x.proto)}</span><span class="service">${escapeHtml(x.product||'Unknown service')}</span></div>
-      <pre>${escapeHtml(x.banner||'No banner collected')}</pre></article>`).join(''):'<div class="empty"><strong>No matching records.</strong>Import passive observations or change your search filters.</div>';
-  }catch(e){$('result-items').innerHTML=`<div class="empty"><strong>Search unavailable</strong>${escapeHtml(e.message)}</div>`}
+    const state = await api("/api/admin/session");
+    $("admin-scan-action").classList.toggle("hidden", !state.authenticated);
+    return state.authenticated;
+  } catch (_) {
+    $("admin-scan-action").classList.add("hidden");
+    return false;
+  }
 }
-$('admin-login').addEventListener('click',()=>{sessionStorage.setItem('scanlattice_admin',$('admin-token').value);loadAdmin()});
-async function loadAdmin(){
-  const token=sessionStorage.getItem('scanlattice_admin');if(!token)return;
-  try{const r=await fetch('/api/admin/workers',{headers:{'X-Admin-Token':token}});const json=await r.json();if(!r.ok)throw Error(json.detail||'Unauthorized');
-    $('admin-content').classList.remove('hidden');$('workers-online').textContent=json.workers.filter(w=>w.online).length;
-    const s=await fetch('/api/stats').then(r=>r.json());$('indexed-hosts').textContent=s.hosts;
-    $('worker-table').innerHTML=json.workers.length?json.workers.map(w=>`<tr><td>${escapeHtml(w.name)}</td><td class="${w.online?'online':'offline'}">${w.online?'● Online':'○ Offline'}</td><td>${w.cpu_pct.toFixed(1)}%</td><td>${w.memory_pct.toFixed(1)}%</td><td>${w.active_jobs}</td><td>${new Date(w.last_seen*1000).toLocaleString()}</td></tr>`).join(''):'<tr><td colspan="6">No workers registered yet. Add the enrollment token to your worker configuration.</td></tr>';
-  }catch(e){$('admin-content').classList.add('hidden');toast(e.message)}
+
+async function route() {
+  const [path, queryPart] = location.hash.slice(1).split("?");
+  const page = ["home", "search", "host", "admin", "docs"].includes(path) ? path : "home";
+  document.querySelectorAll(".page").forEach(node => node.classList.toggle("hidden", node.id !== `page-${page}`));
+  document.querySelectorAll("[data-page]").forEach(node => node.classList.toggle("active", node.dataset.page === page));
+  const params = new URLSearchParams(queryPart || "");
+  if (page === "search") {
+    activeQuery = params.get("q") || activeQuery;
+    $("header-query").value = activeQuery;
+    await search(activeQuery, Number(params.get("page") || 1));
+  } else if (page === "host") {
+    await loadHost(params.get("ip"));
+  } else if (page === "admin") {
+    if (await checkSession()) await loadAdmin();
+  } else if (page === "home") {
+    await loadStats();
+  }
+  await checkSession();
 }
-setInterval(()=>{if(location.hash.startsWith('#admin'))loadAdmin()},10000);
-window.addEventListener('hashchange',route);route();
+
+function submitSearch(value) {
+  activeQuery = value.trim();
+  location.hash = `#search?q=${encodeURIComponent(activeQuery)}&page=1`;
+}
+
+$("hero-search").addEventListener("submit", event => {event.preventDefault(); submitSearch($("hero-query").value);});
+$("top-search").addEventListener("submit", event => {event.preventDefault(); submitSearch($("header-query").value);});
+$("admin-scan-action").addEventListener("click", () => {location.hash = "#admin";});
+
+async function loadStats() {
+  try {
+    const stats = await api("/api/stats");
+    $("home-hosts").textContent = stats.hosts.toLocaleString();
+    $("home-services").textContent = stats.services.toLocaleString();
+  } catch (_) {
+    $("system-status").textContent = "UNAVAILABLE";
+  }
+}
+
+function passiveCard(row) {
+  const subject = row.ip || row.domain || row.subject;
+  return `<article class="observation passive-record">
+    <h3>${row.ip ? `<a href="#host?ip=${encodeURIComponent(row.ip)}">${esc(subject)}</a>` : esc(subject)}</h3>
+    <div class="org">${esc(row.org || row.asn || row.record_type)}</div>
+    <div class="meta">PASSIVE INTELLIGENCE · Source: ${esc(row.source)} · Observed: ${esc(row.observed_at)}</div>
+    <div><span class="service">${esc(row.record_type)}</span>${row.network ? `<span class="service">${esc(row.network)}</span>` : ""}</div>
+    <pre>${esc(JSON.stringify(row.value, null, 2))}</pre>
+  </article>`;
+}
+
+async function search(query, page) {
+  $("result-query").textContent = query ? `/ ${query}` : "";
+  $("result-items").innerHTML = '<div class="empty">Loading public index...</div>';
+  try {
+    const data = await api(`/api/search?q=${encodeURIComponent(query)}&page=${page}&limit=25`);
+    $("search-meta").textContent = `${data.total} indexed observation(s) / ${data.passive_total} passive record(s)`;
+    const facets = (id, values, key) => {
+      $(id).innerHTML = Object.entries(values).sort((a,b) => b[1]-a[1]).slice(0,10)
+        .map(([value,count]) => `<div><a href="#search?q=${encodeURIComponent(`${key}:${value}`)}">${esc(value)}</a><span>${count}</span></div>`).join("") || "No data";
+    };
+    facets("facet-ports", data.facets.ports, "port");
+    facets("facet-countries", data.facets.countries, "country");
+    const indexed = data.indexed_observations.map(row => `<article class="observation">
+      <h3><a href="#host?ip=${encodeURIComponent(row.ip)}">${esc(row.ip)}</a></h3>
+      <div class="org">${esc(row.hostname || row.org || "Unknown organization")}</div>
+      <div class="meta">HISTORICAL OBSERVATION · ${esc(row.country || "Unknown country")} · ${esc(row.asn)} · Observed: ${esc(row.seen_at)} · Source: ${esc(row.source)}${row.is_demo ? " · DEMO DATA" : ""}</div>
+      <div><span class="service">${row.port}/${esc(row.proto)}</span><span class="service">${esc(row.service || row.product || "Unknown service")}</span></div>
+      <pre>${esc(row.banner || "No banner collected")}</pre>
+    </article>`).join("");
+    const passive = data.passive_intelligence.map(passiveCard).join("");
+    $("result-items").innerHTML = data.has_information
+      ? `${indexed ? `<h3 class="result-category">Indexed Observations</h3>${indexed}` : ""}${passive ? `<h3 class="result-category">Passive Intelligence</h3>${passive}` : ""}`
+      : `<div class="empty"><strong>${esc(data.message)}</strong>No active measurement was started.</div>`;
+    const links = [];
+    if (page > 1) links.push(`<a href="#search?q=${encodeURIComponent(query)}&page=${page-1}">← Previous</a>`);
+    if (page < data.pages) links.push(`<a href="#search?q=${encodeURIComponent(query)}&page=${page+1}">Next →</a>`);
+    $("pagination").innerHTML = links.join("");
+  } catch (error) {
+    $("result-items").innerHTML = `<div class="empty"><strong>Search unavailable</strong>${esc(error.message)}</div>`;
+  }
+}
+
+async function loadHost(ip) {
+  if (!ip) return;
+  $("host-title").textContent = ip;
+  $("host-content").innerHTML = '<div class="empty">Loading host record...</div>';
+  try {
+    const data = await api(`/api/hosts/${encodeURIComponent(ip)}`);
+    const host = data.host;
+    const observations = data.latest_by_port.map(row => `<article class="observation"><h3>${row.port}/${esc(row.proto)} — ${esc(row.product || row.service || "Unknown service")}</h3><div class="meta">HISTORICAL OBSERVATION · ${esc(row.seen_at)} · ${esc(row.source)}</div><pre>${esc(row.banner || "No banner collected")}</pre></article>`).join("");
+    const passive = data.passive_intelligence.map(passiveCard).join("");
+    $("host-content").innerHTML = `<div class="hostmeta"><div><small>HOSTNAME</small><strong>${esc(host.hostname || "Not available")}</strong></div><div><small>ORGANIZATION / ASN</small><strong>${esc(host.org || "Unknown")} / ${esc(host.asn || "Unknown")}</strong></div><div><small>COUNTRY</small><strong>${esc(host.country || "Unknown")}</strong></div><div><small>LAST ACTIVE SCAN</small><strong>${esc(host.last_scan_at || "No active scan recorded")}</strong></div></div>${observations ? `<h3>Indexed Observations</h3>${observations}` : ""}${passive ? `<h3>Passive Intelligence</h3>${passive}` : ""}`;
+  } catch (error) {
+    $("host-content").innerHTML = `<div class="empty"><strong>${esc(error.message)}</strong></div>`;
+  }
+}
+
+$("admin-login").addEventListener("click", async () => {
+  try {
+    const data = await api("/api/admin/session", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({admin_token:$("admin-token").value})});
+    csrfToken = data.csrf_token;
+    sessionStorage.setItem("scanlattice_csrf", csrfToken);
+    $("admin-token").value = "";
+    await loadAdmin();
+    await checkSession();
+  } catch (error) {toast(error.message);}
+});
+
+async function loadAdmin() {
+  try {
+    const headers = adminHeaders();
+    const [workers,jobs,authorizations,profiles,stats] = await Promise.all([
+      api("/api/admin/workers",{headers}), api("/api/admin/jobs",{headers}),
+      api("/api/admin/authorizations",{headers}), api("/api/admin/profiles",{headers}), api("/api/stats")
+    ]);
+    $("admin-content").classList.remove("hidden");
+    $("workers-online").textContent = workers.workers.filter(row => row.online).length;
+    $("indexed-hosts").textContent = stats.hosts;
+    $("open-jobs").textContent = jobs.jobs.filter(row => ["queued","assigned","running"].includes(row.status)).length;
+    $("job-profile").innerHTML = profiles.profiles.map(row => `<option value="${row.id}">${esc(row.name)} — ${row.ports.join(",")}</option>`).join("");
+    const selected = $("job-worker").value;
+    $("job-worker").innerHTML = '<option value="">Automatic worker selection</option>' + workers.workers.map(row => `<option value="${row.id}">${esc(row.name)}${row.online ? "" : " (offline)"}</option>`).join("");
+    $("job-worker").value = selected;
+    $("auth-list").innerHTML = authorizations.authorizations.map(row => `<div><b>${esc(row.name)}</b><code>${esc(row.cidr)}</code><span>${row.enabled ? "ENABLED" : "DISABLED"}</span></div>`).join("") || "No authorized target ranges.";
+    $("worker-table").innerHTML = workers.workers.map(row => `<tr><td>${esc(row.name)}<br><small>${row.id}</small></td><td class="${row.online ? "online" : "offline"}">${row.online ? "● Online" : "○ Offline"}</td><td>${row.cpu_pct.toFixed(1)}% / ${row.memory_pct.toFixed(1)}%</td><td>${row.running_jobs} / ${row.max_concurrent}</td><td>${row.completed_jobs}</td><td>${esc(row.version || "legacy")}<br><small>${esc(row.capabilities.join(", "))}</small></td><td>${new Date(row.last_seen*1000).toLocaleString()}</td></tr>`).join("") || '<tr><td colspan="7">No workers enrolled.</td></tr>';
+    $("job-table").innerHTML = jobs.jobs.map(row => `<tr><td><small>${row.id}</small><br><b>${esc(row.target)}</b><br>${row.ports.join(", ")}</td><td>${esc(row.profile_name)}</td><td class="status-${row.status}">${esc(row.status.toUpperCase())}</td><td>${row.progress_done} / ${row.progress_total}</td><td>${esc(row.worker_name || "Unassigned")}</td><td>${esc(row.error || "")}${["queued","assigned","running"].includes(row.status) ? `<button class="tiny cancel-job" data-id="${row.id}">CANCEL</button>` : ""}</td></tr>`).join("") || '<tr><td colspan="6">No scan jobs.</td></tr>';
+    document.querySelectorAll(".cancel-job").forEach(button => button.onclick = () => cancelJob(button.dataset.id));
+  } catch (error) {
+    $("admin-content").classList.add("hidden"); toast(error.message);
+  }
+}
+
+$("auth-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  try {await api("/api/admin/authorizations",{method:"POST",headers:adminHeaders(),body:JSON.stringify({name:$("auth-name").value,cidr:$("auth-cidr").value})}); event.target.reset(); toast("Target authorization created"); await loadAdmin();} catch(error){toast(error.message);}
+});
+$("job-form").addEventListener("submit", async event => {
+  event.preventDefault(); const ports=$("job-ports").value.trim();
+  try {await api("/api/admin/jobs",{method:"POST",headers:adminHeaders(),body:JSON.stringify({target:$("job-target").value,profile_id:Number($("job-profile").value),ports:ports?ports.split(",").map(Number):null,worker_id:$("job-worker").value||null})}); toast("Scan job submitted"); await loadAdmin();} catch(error){toast(error.message);}
+});
+async function cancelJob(id){try{await api(`/api/admin/jobs/${id}/cancel`,{method:"POST",headers:adminHeaders()});toast("Job cancelled");await loadAdmin();}catch(error){toast(error.message);}}
+
+$("job-target").addEventListener("input",()=>{$("job-estimate").textContent="The server validates target size and authorization before accepting this job.";});
+setInterval(()=>{if(location.hash.startsWith("#admin"))loadAdmin();},10000);
+window.addEventListener("hashchange",route);
+route();

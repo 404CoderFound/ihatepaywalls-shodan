@@ -1,307 +1,416 @@
-"""ScanLattice control plane MVP — passive index + authenticated worker registry.
-
-There are deliberately NO active scanner imports, OS command execution, or
-network probes in the web/control server.
-"""
+"""ScanLattice control plane. Active network operations are intentionally absent."""
 from __future__ import annotations
 
-import hashlib
-import hmac
-import ipaddress
-import json
-import os
-import secrets
-import shlex
-import sqlite3
-import time
-from contextlib import contextmanager
-from datetime import datetime, timezone
+import csv, hashlib, hmac, io, ipaddress, json, os, secrets, time, uuid
 from pathlib import Path
-from typing import Annotated
-
-from fastapi import FastAPI, Header, HTTPException, Query
-from fastapi.responses import FileResponse
+from typing import Annotated, Any
+from fastapi import Body, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.datastructures import Headers
+from .database import connection, init_db, utc_now
+from .search import QueryError, build_sql, parse_query
+from .passive import APPROVED_RDAP_BASES, enrich_from_approved_provider, provider_status, search_cached
+from .rate_limit import FixedWindowLimiter
 
-ROOT = Path(__file__).resolve().parent
-DB_PATH = Path(os.getenv("DATABASE_PATH", "/data/scanlattice.db"))
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
-ENROLLMENT_TOKEN = os.getenv("ENROLLMENT_TOKEN", "")
-SEED_DEMO = os.getenv("SEED_DEMO", "false").lower() == "true"
+ROOT=Path(__file__).resolve().parent
+ADMIN_TOKEN=os.getenv("ADMIN_TOKEN",""); ENROLLMENT_TOKEN=os.getenv("ENROLLMENT_TOKEN","")
+SEED_DEMO=os.getenv("SEED_DEMO","false").lower()=="true"
+OFFLINE=int(os.getenv("WORKER_OFFLINE_SECONDS","45")); LEASE=int(os.getenv("JOB_LEASE_SECONDS","90"))
+MAX_TARGETS=int(os.getenv("MAX_JOB_TARGETS","4096")); MAX_PORTS=int(os.getenv("MAX_JOB_PORTS","100"))
+PUBLIC_RATE_LIMIT=int(os.getenv("PUBLIC_RATE_LIMIT","60")); LOGIN_RATE_LIMIT=int(os.getenv("LOGIN_RATE_LIMIT","5"))
+SESSION_SECONDS=int(os.getenv("ADMIN_SESSION_SECONDS","28800")); COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE","true").lower()=="true"
+RATE_LIMITER=FixedWindowLimiter()
+app=FastAPI(title="ScanLattice API",version="0.2.0",docs_url=None,redoc_url=None)
+app.mount("/static",StaticFiles(directory=ROOT/"static"),name="static")
 
-app = FastAPI(title="ScanLattice API", version="0.1.0", docs_url=None, redoc_url=None)
-app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+@app.middleware("http")
+async def bounded(request:Request,call_next):
+    if int(request.headers.get("content-length","0"))>int(os.getenv("MAX_BODY_BYTES",str(2*1024*1024))):
+        return JSONResponse({"detail":"Request body too large"},413)
+    identity=request.client.host if request.client else "unknown"
+    public_path=request.url.path=="/api/search" or request.url.path.startswith("/api/hosts/")
+    if public_path:
+        allowed,remaining=RATE_LIMITER.allow("public",identity,PUBLIC_RATE_LIMIT)
+        if not allowed:return JSONResponse({"detail":"Public API rate limit exceeded"},429,headers={"Retry-After":"60","X-RateLimit-Remaining":"0"})
+    elif request.url.path=="/api/admin/session" and request.method=="POST":
+        allowed,remaining=RATE_LIMITER.allow("login",identity,LOGIN_RATE_LIMIT)
+        if not allowed:return JSONResponse({"detail":"Login rate limit exceeded"},429,headers={"Retry-After":"60"})
+    else:remaining=None
+    session_token=request.cookies.get("scanlattice_session")
+    session=None
+    explicit_admin_header=bool(request.headers.get("x-admin-token"))
+    if session_token:
+        now=int(time.time())
+        with connection() as db:
+            session=db.execute("SELECT * FROM admin_sessions WHERE token_hash=? AND expires_at>?",(digest(session_token),now)).fetchone()
+            db.execute("DELETE FROM admin_sessions WHERE expires_at<=?",(now,))
+            if session:db.execute("UPDATE admin_sessions SET last_seen=? WHERE token_hash=?",(now,digest(session_token)))
+        if session and request.url.path.startswith("/api/admin"):
+            if not explicit_admin_header and request.method not in {"GET","HEAD","OPTIONS"} and request.url.path!="/api/admin/session":
+                csrf=request.headers.get("x-csrf-token","")
+                if not csrf or not hmac.compare_digest(digest(csrf),session["csrf_hash"]):return JSONResponse({"detail":"CSRF validation failed"},403)
+            if "x-admin-token" not in request.headers:
+                request.scope["headers"].append((b"x-admin-token",ADMIN_TOKEN.encode()))
+                request._headers=Headers(scope=request.scope)
+    request.state.admin_authenticated=bool(session) or hmac.compare_digest(request.headers.get("x-admin-token",""),ADMIN_TOKEN) if ADMIN_TOKEN else False
+    response=await call_next(request)
+    if remaining is not None:response.headers["X-RateLimit-Remaining"]=str(remaining)
+    return response
 
-
-@contextmanager
-def connection():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(DB_PATH, timeout=20)
-    db.row_factory = sqlite3.Row
-    try:
-        yield db
-        db.commit()
-    finally:
-        db.close()
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def digest(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-def require_secret(supplied: str | None, secret: str, label: str) -> None:
-    if not secret:
-        raise HTTPException(503, f"{label} is not configured")
-    if not supplied or not hmac.compare_digest(supplied, secret):
-        raise HTTPException(401, "Invalid credentials")
-
-
-def require_admin(token: str | None) -> None:
-    require_secret(token, ADMIN_TOKEN, "Admin token")
-
-
-def require_worker(db: sqlite3.Connection, token: str | None) -> sqlite3.Row:
-    if not token:
-        raise HTTPException(401, "Worker credentials missing")
-    row = db.execute("SELECT * FROM workers WHERE token_hash=?", (digest(token),)).fetchone()
-    if row is None:
-        raise HTTPException(401, "Invalid worker credentials")
+def digest(value:str)->str:return hashlib.sha256(value.encode()).hexdigest()
+def secret(given:str|None,expected:str,label:str):
+    if not expected: raise HTTPException(503,f"{label} is not configured")
+    if not given or not hmac.compare_digest(given,expected): raise HTTPException(401,"Invalid credentials")
+def admin(token:str|None):secret(token,ADMIN_TOKEN,"Admin token")
+def worker(db,token:str|None):
+    row=db.execute("SELECT * FROM workers WHERE token_hash=?",(digest(token or ""),)).fetchone()
+    if row is None: raise HTTPException(401,"Invalid worker credentials")
     return row
-
-
-def init_db() -> None:
-    with connection() as db:
-        db.execute("PRAGMA journal_mode=WAL")
-        db.executescript("""
-            CREATE TABLE IF NOT EXISTS observations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ip TEXT NOT NULL,
-                port INTEGER NOT NULL,
-                proto TEXT NOT NULL DEFAULT 'tcp',
-                asn TEXT NOT NULL DEFAULT '',
-                org TEXT NOT NULL DEFAULT '',
-                country TEXT NOT NULL DEFAULT '',
-                product TEXT NOT NULL DEFAULT '',
-                banner TEXT NOT NULL DEFAULT '',
-                source TEXT NOT NULL DEFAULT 'manual',
-                seen_at TEXT NOT NULL,
-                is_demo INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_observations_ip ON observations(ip);
-            CREATE INDEX IF NOT EXISTS idx_observations_port ON observations(port);
-            CREATE INDEX IF NOT EXISTS idx_observations_asn ON observations(asn);
-            CREATE TABLE IF NOT EXISTS workers (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                token_hash TEXT NOT NULL UNIQUE,
-                capabilities TEXT NOT NULL DEFAULT '[]',
-                cpu_pct REAL NOT NULL DEFAULT 0,
-                memory_pct REAL NOT NULL DEFAULT 0,
-                active_jobs INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                last_seen INTEGER NOT NULL DEFAULT 0
-            );
-        """)
-        if SEED_DEMO and db.execute("SELECT COUNT(*) FROM observations WHERE is_demo=1").fetchone()[0] == 0:
-            samples = [
-                ("192.0.2.10", 443, "tcp", "AS64500", "Example Systems", "US", "nginx", "HTTP/1.1 200 OK\\nserver: nginx\\ncontent-type: text/html", "example", 1),
-                ("198.51.100.22", 22, "tcp", "AS64501", "Test Network", "NL", "OpenSSH", "SSH-2.0-OpenSSH_9.6", "example", 1),
-                ("203.0.113.40", 80, "tcp", "AS64502", "Documentation ISP", "DE", "Apache", "HTTP/1.1 200 OK\\nserver: Apache/2.4", "example", 1),
-                ("192.0.2.75", 8443, "tcp", "AS64500", "Example Systems", "US", "Jetty", "HTTP/1.1 302 Found\\nserver: Jetty", "example", 1),
-            ]
-            db.executemany("""INSERT INTO observations
-                (ip,port,proto,asn,org,country,product,banner,source,is_demo,seen_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)""", [(*r, utc_now()) for r in samples])
-
+def audit(db,action:str,details:dict,actor="admin"):
+    db.execute("INSERT INTO audit_logs(action,actor,details,created_at) VALUES(?,?,?,?)",(action,actor,json.dumps(details),utc_now()))
 
 @app.on_event("startup")
-def startup():
-    init_db()
-
-
+def startup():init_db(SEED_DEMO)
 @app.get("/")
-def home():
-    return FileResponse(ROOT / "static" / "index.html")
-
-
+def home():return FileResponse(ROOT/"static"/"index.html")
 @app.get("/api/health")
-def health():
-    return {"status": "ok", "role": "control-plane", "active_scanning": False}
-
-
+def health():return {"status":"ok","role":"control-plane","active_scanning":False,"version":"0.2.0"}
 @app.get("/api/stats")
 def stats():
-    with connection() as db:
-        count = db.execute("SELECT COUNT(*) AS c FROM observations").fetchone()["c"]
-        hosts = db.execute("SELECT COUNT(DISTINCT ip) AS c FROM observations").fetchone()["c"]
-        workers = db.execute("SELECT COUNT(*) AS c FROM workers WHERE last_seen > ?", (int(time.time()) - 45,)).fetchone()["c"]
-    return {"observations": count, "hosts": hosts, "workers_online": workers, "demo_enabled": SEED_DEMO}
-
-
-KNOWN_FIELDS = {"ip", "asn", "port", "country", "org", "product", "net", "source"}
-
-
-def parse_query(text: str):
-    try:
-        tokens = shlex.split(text)
-    except ValueError as exc:
-        raise HTTPException(400, f"Invalid query: {exc}") from exc
-    filters, free = {}, []
-    for tok in tokens:
-        if ":" in tok and tok.split(":", 1)[0].lower() in KNOWN_FIELDS:
-            key, val = tok.split(":", 1)
-            filters.setdefault(key.lower(), []).append(val)
-        else:
-            free.append(tok)
-    return filters, free
-
+    with connection() as db:return {"observations":db.execute("SELECT COUNT(*) FROM observations").fetchone()[0],"services":db.execute("SELECT COUNT(*) FROM services").fetchone()[0],"hosts":db.execute("SELECT COUNT(*) FROM (SELECT ip FROM hosts UNION SELECT ip FROM passive_records WHERE ip!='')").fetchone()[0],"passive_records":db.execute("SELECT COUNT(*) FROM passive_records").fetchone()[0],"workers_online":db.execute("SELECT COUNT(*) FROM workers WHERE last_seen>?",(int(time.time())-OFFLINE,)).fetchone()[0],"demo_enabled":SEED_DEMO}
 
 @app.get("/api/search")
-def search(q: str = Query("", max_length=500), limit: int = Query(50, ge=1, le=100)):
-    filters, free = parse_query(q)
-    wheres, params = [], []
-    for key, vals in filters.items():
-        for val in vals:
-            if key == "net":
-                try:
-                    network = ipaddress.ip_network(val, strict=False)
-                except ValueError:
-                    raise HTTPException(400, "Invalid CIDR network")
-                # This first milestone has a small SQLite index; an indexed CIDR
-                # lookup should replace this in the production search engine.
-                wheres.append("1=1")
-                continue
-            if key == "port":
-                try:
-                    n = int(val)
-                    if not 0 < n <= 65535:
-                        raise ValueError()
-                except ValueError:
-                    raise HTTPException(400, "Invalid port")
-                wheres.append("port=?")
-                params.append(n)
-            elif key in {"ip", "asn", "country", "source"}:
-                wheres.append(f"{key} = ?")
-                params.append(val.upper() if key in {"asn", "country"} else val)
-            else:
-                wheres.append(f"LOWER({key}) LIKE ?")
-                params.append(f"%{val.lower()}%")
-    for tok in free:
-        wheres.append("(LOWER(banner) LIKE ? OR LOWER(product) LIKE ? OR LOWER(org) LIKE ? OR LOWER(ip) LIKE ?)")
-        params.extend([f"%{tok.lower()}%"] * 4)
-    where = " WHERE " + " AND ".join(wheres) if wheres else ""
+def search(q:str=Query("",max_length=500),page:int=Query(1,ge=1),limit:int=Query(25,ge=1,le=100)):
+    try: parsed=parse_query(q)
+    except QueryError as exc:raise HTTPException(400,str(exc)) from exc
+    where,params,nets=build_sql(parsed)
     with connection() as db:
-        query_rows = db.execute("SELECT * FROM observations" + where + " ORDER BY seen_at DESC, id DESC", params).fetchall()
-        if "net" in filters:
-            nets = [ipaddress.ip_network(v, strict=False) for v in filters["net"]]
-            query_rows = [r for r in query_rows if all(ipaddress.ip_address(r["ip"]) in n for n in nets)]
-        total = len(query_rows)
-        rows = [dict(r) for r in query_rows[:limit]]
-        ports = {}
-        countries = {}
-        for row in query_rows:
-            ports[str(row["port"])] = ports.get(str(row["port"]), 0) + 1
-            countries[row["country"] or "Unknown"] = countries.get(row["country"] or "Unknown", 0) + 1
-    return {"query": q, "total": total, "results": rows, "facets": {"ports": ports, "countries": countries}}
-
+        rows=[dict(r) for r in db.execute("SELECT o.* FROM observations o"+where+" ORDER BY o.seen_at DESC,o.id DESC",params)]
+        passive=search_cached(db,parsed)
+        enrichment=enrich_from_approved_provider(db,parsed) if not rows and not passive else provider_status(db)
+        if enrichment.get("live_lookup_attempted"):passive=search_cached(db,parsed)
+    if nets:rows=[r for r in rows if all(ipaddress.ip_address(r["ip"]) in n for n in nets)]
+    facets={"ports":{},"countries":{},"products":{}}
+    for r in rows:
+        for name,value in (("ports",str(r["port"])),("countries",r["country"] or "Unknown"),("products",r["product"] or "Unknown")):facets[name][value]=facets[name].get(value,0)+1
+    total=len(rows); start=(page-1)*limit
+    passive_start=(page-1)*limit
+    return {"query":q,"page":page,"limit":limit,"pages":max(1,(max(total,len(passive))+limit-1)//limit),"total":total,"passive_total":len(passive),"results":rows[start:start+limit],"indexed_observations":rows[start:start+limit],"passive_intelligence":passive[passive_start:passive_start+limit],"has_information":bool(rows or passive),"message":None if rows or passive else "No indexed or passive information available.","enrichment":enrichment,"facets":facets}
 
 @app.get("/api/hosts/{ip}")
-def host(ip: str):
-    try:
-        ipaddress.ip_address(ip)
-    except ValueError:
-        raise HTTPException(400, "Invalid IP")
+def host(ip:str):
+    try:ipaddress.ip_address(ip)
+    except ValueError as exc:raise HTTPException(400,"Invalid IP") from exc
     with connection() as db:
-        rows = [dict(r) for r in db.execute("SELECT * FROM observations WHERE ip=? ORDER BY port", (ip,)).fetchall()]
-    if not rows:
-        raise HTTPException(404, "Not indexed")
-    return {"ip": ip, "services": rows}
+        h=db.execute("SELECT * FROM hosts WHERE ip=?",(ip,)).fetchone(); rows=[dict(r) for r in db.execute("SELECT * FROM observations WHERE ip=? ORDER BY seen_at DESC,port",(ip,))];passive=[dict(r) for r in db.execute("SELECT * FROM passive_records WHERE ip=? ORDER BY observed_at DESC",(ip,))]
+    for row in passive:row["value"]=json.loads(row.pop("value_json"))
+    if not rows and not passive:raise HTTPException(404,"No indexed or passive information available")
+    latest={}
+    for r in rows:latest.setdefault((r["port"],r["proto"]),r)
+    return {"host":dict(h) if h else {"ip":ip,"last_scan_at":""},"services":rows,"latest_by_port":list(latest.values()),"passive_intelligence":passive}
 
+@app.get("/api/docs")
+def docs():return {"version":"0.2.0","authentication":{"public":"none","admin_browser":"HttpOnly session cookie plus X-CSRF-Token for mutations","admin_api":"X-Admin-Token","worker":"X-Worker-Token"},"search_examples":["port:443","asn:AS30925","country:NL",'org:"Example Organization"',"domain:example.org","service:ssh","net:192.0.2.0/24"],"endpoints":["GET /api/search","GET /api/hosts/{ip}","GET /api/stats","POST /api/admin/session","POST /api/admin/jobs","POST /api/admin/import","POST /api/admin/passive/import"]}
+
+class SessionLogin(BaseModel):
+    admin_token:str=Field(min_length=1,max_length=500)
+
+@app.post("/api/admin/session")
+def session_login(p:SessionLogin,response:Response):
+    admin(p.admin_token);token=secrets.token_urlsafe(48);csrf=secrets.token_urlsafe(32);now=int(time.time())
+    with connection() as db:
+        db.execute("INSERT INTO admin_sessions(token_hash,csrf_hash,created_at,expires_at,last_seen) VALUES(?,?,?,?,?)",(digest(token),digest(csrf),now,now+SESSION_SECONDS,now));audit(db,"admin.session_created",{},"administrator")
+    response.set_cookie("scanlattice_session",token,max_age=SESSION_SECONDS,httponly=True,secure=COOKIE_SECURE,samesite="strict",path="/")
+    return {"authenticated":True,"csrf_token":csrf,"expires_at":now+SESSION_SECONDS}
+
+@app.get("/api/admin/session")
+def session_status(request:Request):
+    return {"authenticated":bool(request.state.admin_authenticated)}
+
+@app.post("/api/admin/session/logout")
+def session_logout(request:Request,response:Response,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    token=request.cookies.get("scanlattice_session")
+    if token:
+        with connection() as db:db.execute("DELETE FROM admin_sessions WHERE token_hash=?",(digest(token),))
+    response.delete_cookie("scanlattice_session",path="/",secure=COOKIE_SECURE,samesite="strict")
+    return {"authenticated":False}
 
 class Registration(BaseModel):
-    name: str = Field(min_length=1, max_length=80)
-    capabilities: list[str] = Field(default_factory=list, max_length=15)
-
-
+    name:str=Field(min_length=1,max_length=80); capabilities:list[str]=Field(default_factory=list,max_length=20); version:str=Field(default="legacy",max_length=40); max_concurrent:int=Field(default=1,ge=1,le=16)
 @app.post("/api/worker/register")
-def worker_register(payload: Registration, x_enrollment_token: Annotated[str | None, Header()] = None):
-    require_secret(x_enrollment_token, ENROLLMENT_TOKEN, "Enrollment token")
-    worker_id = secrets.token_hex(12)
-    worker_token = secrets.token_urlsafe(48)
+def register(p:Registration,x_enrollment_token:Annotated[str|None,Header()]=None):
+    secret(x_enrollment_token,ENROLLMENT_TOKEN,"Enrollment token"); wid=secrets.token_hex(12); token=secrets.token_urlsafe(48)
     with connection() as db:
-        db.execute("""INSERT INTO workers (id,name,token_hash,capabilities,created_at,last_seen)
-                     VALUES (?,?,?,?,?,?)""", (worker_id, payload.name, digest(worker_token), json.dumps(payload.capabilities), utc_now(), int(time.time())))
-    return {"worker_id": worker_id, "worker_token": worker_token, "heartbeat_seconds": 10}
-
+        db.execute("INSERT INTO workers(id,name,token_hash,capabilities,version,max_concurrent,created_at,last_seen) VALUES(?,?,?,?,?,?,?,?)",(wid,p.name,digest(token),json.dumps(p.capabilities),p.version,p.max_concurrent,utc_now(),int(time.time())));audit(db,"worker.enrolled",{"worker_id":wid,"name":p.name},"enrollment")
+    return {"worker_id":wid,"worker_token":token,"heartbeat_seconds":10}
 
 class Heartbeat(BaseModel):
-    cpu_pct: float = Field(ge=0, le=100)
-    memory_pct: float = Field(ge=0, le=100)
-    active_jobs: int = Field(default=0, ge=0, le=10000)
+    cpu_pct:float=Field(ge=0,le=100);memory_pct:float=Field(ge=0,le=100);active_jobs:int=Field(default=0,ge=0,le=100);version:str=Field(default="",max_length=40);capabilities:list[str]|None=None;max_concurrent:int|None=Field(default=None,ge=1,le=16)
 
+def schedule(db):
+    now=int(time.time())
+    for j in db.execute("SELECT * FROM scan_jobs WHERE status IN ('assigned','running') AND lease_expires_at<?",(now,)).fetchall():
+        status="failed" if j["attempts"]>=j["max_attempts"] else "queued"
+        db.execute("UPDATE scan_jobs SET status=?,assigned_worker_id=NULL,lease_token=NULL,lease_expires_at=NULL,error='Worker lease expired',updated_at=? WHERE id=?",(status,utc_now(),j["id"]))
+    workers=[dict(r) for r in db.execute("SELECT * FROM workers WHERE last_seen>?",(now-OFFLINE,))]
+    for j in db.execute("SELECT * FROM scan_jobs WHERE status='queued' ORDER BY created_at").fetchall():
+        choices=[]
+        for w in workers:
+            if "tcp-connect" not in json.loads(w["capabilities"]) or (j["requested_worker_id"] and j["requested_worker_id"]!=w["id"]):continue
+            running=db.execute("SELECT COUNT(*) FROM scan_jobs WHERE assigned_worker_id=? AND status IN ('assigned','running')",(w["id"],)).fetchone()[0]
+            if running<w["max_concurrent"]:choices.append((running*40+w["cpu_pct"]*.4+w["memory_pct"]*.2,w))
+        if choices:
+            w=min(choices,key=lambda x:x[0])[1]
+            db.execute("UPDATE scan_jobs SET status='assigned',assigned_worker_id=?,attempts=attempts+1,lease_token=?,lease_expires_at=?,updated_at=? WHERE id=? AND status='queued'",(w["id"],secrets.token_urlsafe(24),now+LEASE,utc_now(),j["id"]))
 
 @app.post("/api/worker/heartbeat")
-def worker_heartbeat(payload: Heartbeat, x_worker_token: Annotated[str | None, Header()] = None):
+def heartbeat(p:Heartbeat,x_worker_token:Annotated[str|None,Header()]=None):
     with connection() as db:
-        worker = require_worker(db, x_worker_token)
-        db.execute("UPDATE workers SET cpu_pct=?,memory_pct=?,active_jobs=?,last_seen=? WHERE id=?", (
-            payload.cpu_pct, payload.memory_pct, payload.active_jobs, int(time.time()), worker["id"]))
-    return {"status": "ok", "jobs_available": 0}
+        w=worker(db,x_worker_token); fields=["cpu_pct=?","memory_pct=?","active_jobs=?","last_seen=?"]; vals=[p.cpu_pct,p.memory_pct,p.active_jobs,int(time.time())]
+        if p.version:fields+=['version=?'];vals+=[p.version]
+        if p.capabilities is not None:fields+=['capabilities=?'];vals+=[json.dumps(p.capabilities)]
+        if p.max_concurrent is not None:fields+=['max_concurrent=?'];vals+=[p.max_concurrent]
+        db.execute(f"UPDATE workers SET {','.join(fields)} WHERE id=?",vals+[w["id"]]);schedule(db);available=db.execute("SELECT COUNT(*) FROM scan_jobs WHERE assigned_worker_id=? AND status='assigned'",(w["id"],)).fetchone()[0]
+    return {"status":"ok","jobs_available":available}
 
+@app.post("/api/worker/jobs/claim")
+def claim(x_worker_token:Annotated[str|None,Header()]=None):
+    with connection() as db:
+        w=worker(db,x_worker_token);schedule(db);rows=[dict(r) for r in db.execute("SELECT j.*,p.connect_timeout,p.banner_timeout,p.max_concurrency,a.cidr authorization_cidr FROM scan_jobs j JOIN scan_profiles p ON p.id=j.profile_id JOIN authorizations a ON a.id=j.authorization_id WHERE j.assigned_worker_id=? AND j.status='assigned' ORDER BY j.created_at LIMIT ?",(w["id"],w["max_concurrent"]))]
+    for r in rows:r["ports"]=json.loads(r["ports"])
+    return {"jobs":rows}
 
 @app.get("/api/worker/jobs")
-def worker_jobs(x_worker_token: Annotated[str | None, Header()] = None):
-    with connection() as db:
-        require_worker(db, x_worker_token)
-    # No targets are scanned in this release. An authorized-scope job queue
-    # will be added later, without installing a scanner on this server.
-    return {"jobs": [], "scanning_enabled": False}
+def legacy_jobs(x_worker_token:Annotated[str|None,Header()]=None):
+    """Keep v0.1 heartbeat-only agents connected until their container is upgraded."""
+    with connection() as db:worker(db,x_worker_token)
+    return {"jobs":[],"upgrade_required":True,"minimum_worker_version":"0.2.0"}
 
-
-@app.get("/api/admin/workers")
-def admin_workers(x_admin_token: Annotated[str | None, Header()] = None):
-    require_admin(x_admin_token)
-    with connection() as db:
-        rows = [dict(r) for r in db.execute("SELECT id,name,capabilities,cpu_pct,memory_pct,active_jobs,created_at,last_seen FROM workers ORDER BY created_at DESC")]
-    cutoff = int(time.time()) - 45
-    for r in rows:
-        r["online"] = r["last_seen"] > cutoff
-        r["capabilities"] = json.loads(r["capabilities"])
-    return {"workers": rows, "scan_jobs_enabled": False}
-
+class LeaseAction(BaseModel):
+    lease_token:str=Field(min_length=10,max_length=200);progress_done:int|None=Field(default=None,ge=0);error:str=Field(default="",max_length=1000)
+def leased(db,jid,wid,token):
+    j=db.execute("SELECT * FROM scan_jobs WHERE id=? AND assigned_worker_id=? AND lease_token=?",(jid,wid,token)).fetchone()
+    if j is None or j["status"] in {"cancelled","completed","failed"} or (j["lease_expires_at"] or 0)<int(time.time()):raise HTTPException(409,"Job lease is invalid or expired")
+    return j
+@app.post("/api/worker/jobs/{jid}/start")
+def start(jid:str,p:LeaseAction,x_worker_token:Annotated[str|None,Header()]=None):
+    with connection() as db:w=worker(db,x_worker_token);leased(db,jid,w["id"],p.lease_token);db.execute("UPDATE scan_jobs SET status='running',started_at=COALESCE(started_at,?),updated_at=?,lease_expires_at=? WHERE id=?",(utc_now(),utc_now(),int(time.time())+LEASE,jid))
+    return {"status":"running"}
+@app.post("/api/worker/jobs/{jid}/progress")
+def progress(jid:str,p:LeaseAction,x_worker_token:Annotated[str|None,Header()]=None):
+    with connection() as db:w=worker(db,x_worker_token);j=leased(db,jid,w["id"],p.lease_token);db.execute("UPDATE scan_jobs SET progress_done=?,updated_at=?,lease_expires_at=? WHERE id=?",(min(p.progress_done or 0,j["progress_total"]),utc_now(),int(time.time())+LEASE,jid))
+    return {"status":"ok"}
 
 class Observation(BaseModel):
-    ip: str
-    port: int = Field(ge=1, le=65535)
-    proto: str = Field(default="tcp", pattern="^(tcp|udp)$")
-    asn: str = Field(default="", max_length=40)
-    org: str = Field(default="", max_length=160)
-    country: str = Field(default="", max_length=8)
-    product: str = Field(default="", max_length=160)
-    banner: str = Field(default="", max_length=8192)
-    source: str = Field(default="manual", max_length=100)
+    ip:str;port:int=Field(ge=1,le=65535);proto:str=Field(default="tcp",pattern="^(tcp|udp)$");hostname:str=Field(default="",max_length=253);asn:str=Field(default="",max_length=40);org:str=Field(default="",max_length=160);country:str=Field(default="",max_length=8);service:str=Field(default="",max_length=80);product:str=Field(default="",max_length=160);banner:str=Field(default="",max_length=8192);source:str=Field(default="manual",max_length=200);http:dict[str,Any]=Field(default_factory=dict);tls:dict[str,Any]=Field(default_factory=dict);ssh_id:str=Field(default="",max_length=500);latency_ms:float|None=Field(default=None,ge=0,le=120000)
+class Results(BaseModel):
+    lease_token:str;idempotency_key:str=Field(min_length=8,max_length=200);observations:list[Observation]=Field(default_factory=list,max_length=10000)
 
+class PassiveRecord(BaseModel):
+    subject:str=Field(min_length=1,max_length=500)
+    subject_type:str=Field(pattern="^(ip|domain|asn|network)$")
+    ip:str=Field(default="",max_length=64)
+    domain:str=Field(default="",max_length=253)
+    asn:str=Field(default="",max_length=40)
+    org:str=Field(default="",max_length=200)
+    network:str=Field(default="",max_length=80)
+    record_type:str=Field(min_length=1,max_length=80)
+    value:dict[str,Any]=Field(default_factory=dict)
+    source:str=Field(min_length=2,max_length=200)
+    observed_at:str=Field(default_factory=utc_now)
+    ttl_seconds:int|None=Field(default=None,ge=60,le=31536000)
+
+class PassiveImport(BaseModel):
+    records:list[PassiveRecord]=Field(min_length=1,max_length=1000)
+
+class ProviderCreate(BaseModel):
+    name:str=Field(min_length=2,max_length=100)
+    provider_type:str=Field(pattern="^(import|rdap|passive_dns|certificate_transparency)$")
+    enabled:bool=False
+    config:dict[str,Any]=Field(default_factory=dict)
+    requests_per_minute:int=Field(default=10,ge=1,le=120)
+
+class ProfileCreate(BaseModel):
+    name:str=Field(min_length=2,max_length=100)
+    ports:list[int]=Field(min_length=1,max_length=100)
+    connect_timeout:float=Field(default=3,ge=.2,le=15)
+    banner_timeout:float=Field(default=3,ge=.2,le=15)
+    max_concurrency:int=Field(default=20,ge=1,le=50)
+
+def store(db,rows:list[Observation],source:str,jid=None,wid=None):
+    now=utc_now()
+    for r in rows:
+        try:ipaddress.ip_address(r.ip)
+        except ValueError as exc:raise HTTPException(400,f"Invalid IP: {r.ip}") from exc
+        observation=db.execute("INSERT INTO observations(ip,port,proto,hostname,asn,org,country,service,product,banner,source,seen_at,http_json,tls_json,ssh_id,latency_ms,scan_job_id,worker_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(r.ip,r.port,r.proto,r.hostname,r.asn.upper(),r.org,r.country.upper(),r.service,r.product,r.banner,source,now,json.dumps(r.http),json.dumps(r.tls),r.ssh_id,r.latency_ms,jid,wid))
+        db.execute("INSERT INTO hosts(ip,hostname,asn,org,country,first_seen,last_seen,last_scan_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(ip) DO UPDATE SET hostname=CASE WHEN excluded.hostname!='' THEN excluded.hostname ELSE hosts.hostname END,asn=CASE WHEN excluded.asn!='' THEN excluded.asn ELSE hosts.asn END,org=CASE WHEN excluded.org!='' THEN excluded.org ELSE hosts.org END,country=CASE WHEN excluded.country!='' THEN excluded.country ELSE hosts.country END,last_seen=excluded.last_seen,last_scan_at=excluded.last_scan_at",(r.ip,r.hostname,r.asn.upper(),r.org,r.country.upper(),now,now,now if jid else ""))
+        db.execute("INSERT INTO services(host_ip,port,proto,service,product,first_seen,last_seen,last_observation_id) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(host_ip,port,proto) DO UPDATE SET service=excluded.service,product=excluded.product,last_seen=excluded.last_seen,last_observation_id=excluded.last_observation_id",(r.ip,r.port,r.proto,r.service,r.product,now,now,observation.lastrowid))
+    return len(rows)
+
+@app.post("/api/worker/jobs/{jid}/results")
+def results(jid:str,p:Results,x_worker_token:Annotated[str|None,Header()]=None):
+    with connection() as db:
+        w=worker(db,x_worker_token);dup=db.execute("SELECT observation_count FROM result_uploads WHERE idempotency_key=?",(p.idempotency_key,)).fetchone()
+        if dup:return {"status":"already_processed","indexed":dup[0]}
+        j=leased(db,jid,w["id"],p.lease_token);auth=db.execute("SELECT cidr FROM authorizations WHERE id=? AND enabled=1",(j["authorization_id"],)).fetchone()
+        if not auth:raise HTTPException(409,"Target authorization was revoked")
+        target=ipaddress.ip_network(j["target"]);allowed=ipaddress.ip_network(auth[0]);ports=json.loads(j["ports"])
+        if any(ipaddress.ip_address(r.ip) not in target or ipaddress.ip_address(r.ip) not in allowed or r.port not in ports for r in p.observations):raise HTTPException(400,"Result outside authorized job scope")
+        count=store(db,p.observations,"active-scan",jid,w["id"]);db.execute("INSERT INTO result_uploads VALUES(?,?,?,?,?)",(p.idempotency_key,jid,w["id"],utc_now(),count));db.execute("UPDATE scan_jobs SET status='completed',progress_done=progress_total,completed_at=?,updated_at=?,lease_expires_at=NULL WHERE id=?",(utc_now(),utc_now(),jid));db.execute("UPDATE workers SET completed_jobs=completed_jobs+1 WHERE id=?",(w["id"],))
+    return {"status":"completed","indexed":count}
+@app.post("/api/worker/jobs/{jid}/fail")
+def fail(jid:str,p:LeaseAction,x_worker_token:Annotated[str|None,Header()]=None):
+    with connection() as db:w=worker(db,x_worker_token);leased(db,jid,w["id"],p.lease_token);db.execute("UPDATE scan_jobs SET status='failed',error=?,completed_at=?,updated_at=?,lease_expires_at=NULL WHERE id=?",(p.error or "Worker reported failure",utc_now(),utc_now(),jid))
+    return {"status":"failed"}
 
 class ImportPayload(BaseModel):
-    observations: list[Observation] = Field(min_length=1, max_length=1000)
-
-
+    observations:list[Observation]=Field(min_length=1,max_length=1000);provenance:str=Field(default="administrator import",min_length=2,max_length=200)
 @app.post("/api/admin/import")
-def import_observations(payload: ImportPayload, x_admin_token: Annotated[str | None, Header()] = None):
-    require_admin(x_admin_token)
-    data = []
-    for row in payload.observations:
-        try:
-            ipaddress.ip_address(row.ip)
-        except ValueError:
-            raise HTTPException(400, f"Invalid IP: {row.ip}")
-        data.append((row.ip, row.port, row.proto, row.asn.upper(), row.org, row.country.upper(), row.product, row.banner, row.source, utc_now()))
+def import_json(p:ImportPayload,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:count=store(db,p.observations,p.provenance);audit(db,"observations.imported",{"count":count,"provenance":p.provenance})
+    return {"imported":count,"provenance":p.provenance}
+@app.post("/api/admin/import/csv")
+def import_csv(provenance:str=Query(...,min_length=2,max_length=200),body:bytes=Body(...,media_type="text/csv"),x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    try:rows=[Observation(**r) for r in csv.DictReader(io.StringIO(body.decode("utf-8-sig")))]
+    except Exception as exc:raise HTTPException(400,f"Invalid CSV: {exc}") from exc
+    if not 1<=len(rows)<=1000:raise HTTPException(400,"CSV must contain 1 to 1000 rows")
+    with connection() as db:count=store(db,rows,provenance);audit(db,"observations.imported",{"count":count,"provenance":provenance,"format":"csv"})
+    return {"imported":count,"provenance":provenance}
+
+@app.post("/api/admin/passive/import")
+def import_passive(p:PassiveImport,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token);now=int(time.time())
     with connection() as db:
-        db.executemany("""INSERT INTO observations (ip,port,proto,asn,org,country,product,banner,source,seen_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?)""", data)
-    return {"imported": len(data)}
+        for row in p.records:
+            if row.ip:
+                try:ipaddress.ip_address(row.ip)
+                except ValueError as exc:raise HTTPException(400,f"Invalid passive IP: {row.ip}") from exc
+            if row.network:
+                try:ipaddress.ip_network(row.network,strict=False)
+                except ValueError as exc:raise HTTPException(400,f"Invalid passive network: {row.network}") from exc
+            expires=now+row.ttl_seconds if row.ttl_seconds else None
+            db.execute("""INSERT INTO passive_records(subject,subject_type,ip,domain,asn,org,network,record_type,value_json,source,observed_at,expires_at)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(subject,record_type,source,value_json) DO UPDATE SET observed_at=excluded.observed_at,expires_at=excluded.expires_at""",
+              (row.subject,row.subject_type,row.ip,row.domain.lower(),row.asn.upper(),row.org,row.network,row.record_type,json.dumps(row.value,sort_keys=True),row.source,row.observed_at,expires))
+        audit(db,"passive.imported",{"count":len(p.records),"sources":sorted({r.source for r in p.records})})
+    return {"imported":len(p.records)}
+
+@app.get("/api/admin/passive/providers")
+def list_providers(x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:rows=[dict(r) for r in db.execute("SELECT * FROM passive_providers ORDER BY name")]
+    for row in rows:row["config"]=json.loads(row.pop("config_json"))
+    return {"providers":rows}
+
+@app.post("/api/admin/passive/providers")
+def create_provider(p:ProviderCreate,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    if any(any(word in key.lower() for word in ("secret","token","password","api_key")) for key in p.config):raise HTTPException(400,"Store provider secrets in environment variables, not provider configuration")
+    if p.provider_type=="rdap" and p.config.get("base_url","https://rdap.org/ip/") not in APPROVED_RDAP_BASES:raise HTTPException(400,"RDAP base URL is not on the approved provider allowlist")
+    now=utc_now()
+    with connection() as db:
+        try:cursor=db.execute("INSERT INTO passive_providers(name,provider_type,enabled,config_json,requests_per_minute,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",(p.name,p.provider_type,int(p.enabled),json.dumps(p.config),p.requests_per_minute,now,now))
+        except Exception as exc:raise HTTPException(409,"Provider name already exists") from exc
+        audit(db,"passive.provider_created",{"provider_id":cursor.lastrowid,"type":p.provider_type,"enabled":p.enabled})
+    return {"id":cursor.lastrowid,"name":p.name,"provider_type":p.provider_type,"enabled":p.enabled}
+
+class AuthCreate(BaseModel):name:str=Field(min_length=2,max_length=100);cidr:str
+@app.post("/api/admin/authorizations")
+def create_auth(p:AuthCreate,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    try:net=ipaddress.ip_network(p.cidr,strict=False)
+    except ValueError as exc:raise HTTPException(400,"Invalid CIDR") from exc
+    with connection() as db:
+        try:cur=db.execute("INSERT INTO authorizations(name,cidr,created_at) VALUES(?,?,?)",(p.name,str(net),utc_now()))
+        except Exception as exc:raise HTTPException(409,"Authorization already exists") from exc
+        audit(db,"authorization.created",{"id":cur.lastrowid,"cidr":str(net)})
+    return {"id":cur.lastrowid,"name":p.name,"cidr":str(net),"enabled":True}
+@app.get("/api/admin/authorizations")
+def auths(x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:return {"authorizations":[dict(r) for r in db.execute("SELECT * FROM authorizations ORDER BY id DESC")]}
+
+@app.post("/api/admin/authorizations/{auth_id}/revoke")
+def revoke_auth(auth_id:int,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:
+        if db.execute("SELECT 1 FROM authorizations WHERE id=?",(auth_id,)).fetchone() is None:raise HTTPException(404,"Authorization not found")
+        db.execute("UPDATE authorizations SET enabled=0 WHERE id=?",(auth_id,));audit(db,"authorization.revoked",{"id":auth_id})
+    return {"enabled":False}
+@app.get("/api/admin/profiles")
+def profiles(x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:rows=[dict(r) for r in db.execute("SELECT * FROM scan_profiles ORDER BY id")]
+    for r in rows:r["ports"]=[int(x) for x in r["ports"].split(",")]
+    return {"profiles":rows}
+
+@app.post("/api/admin/profiles")
+def create_profile(p:ProfileCreate,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token);ports=sorted(set(p.ports))
+    if any(not 1<=port<=65535 for port in ports):raise HTTPException(400,"Profile contains an invalid port")
+    with connection() as db:
+        try:cursor=db.execute("INSERT INTO scan_profiles(name,ports,connect_timeout,banner_timeout,max_concurrency,created_at) VALUES(?,?,?,?,?,?)",(p.name,",".join(map(str,ports)),p.connect_timeout,p.banner_timeout,p.max_concurrency,utc_now()))
+        except Exception as exc:raise HTTPException(409,"Profile name already exists") from exc
+        audit(db,"profile.created",{"profile_id":cursor.lastrowid,"name":p.name,"ports":ports})
+    return {"id":cursor.lastrowid,"name":p.name,"ports":ports}
+
+class JobCreate(BaseModel):target:str;profile_id:int;ports:list[int]|None=None;worker_id:str|None=None
+@app.post("/api/admin/jobs")
+def create_job(p:JobCreate,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    try:target=ipaddress.ip_network(p.target,strict=False)
+    except ValueError as exc:raise HTTPException(400,"Target must be an IP address or CIDR") from exc
+    if target.num_addresses>MAX_TARGETS:raise HTTPException(400,f"Target exceeds maximum of {MAX_TARGETS} addresses")
+    with connection() as db:
+        auth=next((r for r in db.execute("SELECT * FROM authorizations WHERE enabled=1") if target.subnet_of(ipaddress.ip_network(r["cidr"]))),None)
+        if auth is None:raise HTTPException(403,"Target is not within an enabled authorization")
+        profile=db.execute("SELECT * FROM scan_profiles WHERE id=?",(p.profile_id,)).fetchone()
+        if profile is None:raise HTTPException(404,"Scan profile not found")
+        ports=sorted(set(p.ports if p.ports is not None else [int(x) for x in profile["ports"].split(",")]))
+        if not ports or len(ports)>MAX_PORTS or any(not 1<=x<=65535 for x in ports):raise HTTPException(400,"Invalid or excessive port selection")
+        if p.worker_id and db.execute("SELECT 1 FROM workers WHERE id=?",(p.worker_id,)).fetchone() is None:raise HTTPException(404,"Worker not found")
+        jid=str(uuid.uuid4());now=utc_now();db.execute("INSERT INTO scan_jobs(id,target,authorization_id,profile_id,ports,requested_worker_id,status,progress_total,created_at,updated_at) VALUES(?,?,?,?,?,?,'queued',?,?,?)",(jid,str(target),auth["id"],profile["id"],json.dumps(ports),p.worker_id,int(target.num_addresses)*len(ports),now,now));audit(db,"job.created",{"job_id":jid,"target":str(target),"ports":ports});schedule(db);job=dict(db.execute("SELECT * FROM scan_jobs WHERE id=?",(jid,)).fetchone())
+    job["ports"]=ports;job.pop("lease_token",None);return job
+@app.get("/api/admin/jobs")
+def jobs(x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:schedule(db);rows=[dict(r) for r in db.execute("SELECT j.*,w.name worker_name,p.name profile_name FROM scan_jobs j LEFT JOIN workers w ON w.id=j.assigned_worker_id JOIN scan_profiles p ON p.id=j.profile_id ORDER BY j.created_at DESC LIMIT 200")]
+    for r in rows:r["ports"]=json.loads(r["ports"]);r.pop("lease_token",None)
+    return {"jobs":rows}
+@app.post("/api/admin/jobs/{jid}/cancel")
+def cancel(jid:str,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:
+        row=db.execute("SELECT status FROM scan_jobs WHERE id=?",(jid,)).fetchone()
+        if row is None:raise HTTPException(404,"Job not found")
+        if row["status"] not in {"queued","assigned","running"}:raise HTTPException(409,f"Cannot cancel a {row['status']} job")
+        db.execute("UPDATE scan_jobs SET status='cancelled',updated_at=?,completed_at=?,lease_expires_at=NULL WHERE id=?",(utc_now(),utc_now(),jid));audit(db,"job.cancelled",{"job_id":jid})
+    return {"status":"cancelled"}
+@app.get("/api/admin/workers")
+def workers(x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:schedule(db);rows=[dict(r) for r in db.execute("SELECT id,name,capabilities,cpu_pct,memory_pct,active_jobs,completed_jobs,max_concurrent,version,created_at,last_seen,last_error FROM workers ORDER BY created_at DESC")];counts={r["assigned_worker_id"]:r["c"] for r in db.execute("SELECT assigned_worker_id,COUNT(*) c FROM scan_jobs WHERE status IN ('assigned','running') GROUP BY assigned_worker_id")}
+    for r in rows:r["online"]=r["last_seen"]>int(time.time())-OFFLINE;r["capabilities"]=json.loads(r["capabilities"]);r["running_jobs"]=counts.get(r["id"],0)
+    return {"workers":rows}
+
+@app.post("/api/admin/workers/{worker_id}/rotate-token")
+def rotate_worker_token(worker_id:str,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token);new_token=secrets.token_urlsafe(48)
+    with connection() as db:
+        if db.execute("SELECT 1 FROM workers WHERE id=?",(worker_id,)).fetchone() is None:raise HTTPException(404,"Worker not found")
+        db.execute("UPDATE workers SET token_hash=? WHERE id=?",(digest(new_token),worker_id));audit(db,"worker.credential_rotated",{"worker_id":worker_id})
+    return {"worker_id":worker_id,"worker_token":new_token,"notice":"Update the worker state securely; the previous token is now invalid."}
+@app.get("/api/admin/audit")
+def logs(x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:return {"logs":[dict(r) for r in db.execute("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 200")]}
+
+@app.get("/api/admin/settings")
+def settings(x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    return {"active_scanning_on_control_plane":False,"max_job_targets":MAX_TARGETS,"max_job_ports":MAX_PORTS,"job_lease_seconds":LEASE,"worker_offline_seconds":OFFLINE,"database":"sqlite","configuration_source":"environment"}
