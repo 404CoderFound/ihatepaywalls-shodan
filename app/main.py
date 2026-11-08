@@ -5,6 +5,7 @@ import csv, hashlib, hmac, io, ipaddress, json, math, os, secrets, time, uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import unquote
 from fastapi import Body, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -28,6 +29,7 @@ PUBLIC_RATE_LIMIT=int(os.getenv("PUBLIC_RATE_LIMIT","60")); LOGIN_RATE_LIMIT=int
 SESSION_SECONDS=int(os.getenv("ADMIN_SESSION_SECONDS","28800")); COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE","true").lower()=="true"
 ENRICHMENT_ENABLED=os.getenv("PASSIVE_ENRICHMENT_ENABLED","true").lower()=="true"
 MAX_ENRICHMENT_QUEUE=int(os.getenv("MAX_ENRICHMENT_QUEUE","100"))
+MAX_SCREENSHOT_BYTES=int(os.getenv("MAX_SCREENSHOT_BYTES",str(5*1024*1024)))
 MAX_CAMPAIGN_TARGETS=int(os.getenv("MAX_CAMPAIGN_TARGETS","65536"));MAX_BATCH_TARGETS=int(os.getenv("MAX_BATCH_TARGETS","256"))
 RATE_LIMITER=FixedWindowLimiter()
 app=FastAPI(title="ScanLattice API",version="1.0.0",docs_url=None,redoc_url=None)
@@ -36,7 +38,8 @@ app.mount("/static",StaticFiles(directory=ROOT/"static"),name="static")
 
 @app.middleware("http")
 async def bounded(request:Request,call_next):
-    body_limit=int(os.getenv("MAX_IMPORT_CHUNK_BYTES",str(8*1024*1024))) if request.url.path=="/api/admin/datasets/imports" else int(os.getenv("MAX_BODY_BYTES",str(2*1024*1024)))
+    screenshot_path=request.url.path.startswith("/api/admin/hosts/") and request.url.path.endswith("/screenshots")
+    body_limit=int(os.getenv("MAX_IMPORT_CHUNK_BYTES",str(8*1024*1024))) if request.url.path=="/api/admin/datasets/imports" else MAX_SCREENSHOT_BYTES if screenshot_path else int(os.getenv("MAX_BODY_BYTES",str(2*1024*1024)))
     if int(request.headers.get("content-length","0"))>body_limit:
         return JSONResponse({"detail":"Request body too large"},413)
     identity=request.client.host if request.client else "unknown"
@@ -164,7 +167,7 @@ def docs():return {
     "endpoints":{
         "public_read":["GET /api/search","GET /api/hosts/{ip}","GET /api/hosts/{ip}/observations","GET /api/domains/{domain}","GET /api/stats","GET /api/enrichment/{id}","GET /api/analytics/summary","GET /api/reports/export.csv","GET /api/vulnerabilities","GET /api/vulnerabilities/stats","GET /api/vulnerabilities/{cve}"],
         "admin_session":["POST /api/admin/session","GET /api/admin/session","POST /api/admin/session/logout"],
-        "admin_control":["GET/POST /api/admin/authorizations","GET /api/admin/hosts/{ip}/authorization","GET/POST /api/admin/jobs","POST /api/admin/jobs/{id}/cancel","GET /api/admin/workers","POST /api/admin/passive/providers","PUT /api/admin/passive/providers/{id}","POST /api/admin/datasets/imports (Content-Range chunk upload)","POST /api/admin/datasets/imports/{id}/resume","POST /api/admin/vulnerabilities/refresh","GET /api/admin/vulnerabilities/providers","GET/POST /api/admin/monitor/targets","GET/POST /api/admin/monitor/destinations","GET /api/admin/monitor/events","GET /api/admin/monitor/notifications","POST /api/admin/monitor/notifications/{id}/retry","POST /api/admin/monitor/events/{id}/acknowledge","GET/POST /api/admin/api-keys","GET/POST /api/admin/saved-searches"],
+        "admin_control":["GET/POST /api/admin/authorizations","GET /api/admin/hosts/{ip}/authorization","POST /api/admin/hosts/{ip}/screenshots","GET /api/admin/screenshots","GET /api/admin/screenshots/{id}/content","GET/POST /api/admin/jobs","POST /api/admin/jobs/{id}/cancel","GET /api/admin/workers","POST /api/admin/passive/providers","PUT /api/admin/passive/providers/{id}","POST /api/admin/datasets/imports (Content-Range chunk upload)","POST /api/admin/datasets/imports/{id}/resume","POST /api/admin/vulnerabilities/refresh","GET /api/admin/vulnerabilities/providers","GET/POST /api/admin/monitor/targets","GET/POST /api/admin/monitor/destinations","GET /api/admin/monitor/events","GET /api/admin/monitor/notifications","POST /api/admin/monitor/notifications/{id}/retry","POST /api/admin/monitor/events/{id}/acknowledge","GET/POST /api/admin/api-keys","GET/POST /api/admin/saved-searches"],
         "worker":["POST /api/worker/register","POST /api/worker/heartbeat","GET /api/worker/jobs/next","POST /api/worker/jobs/{id}/results"]
     },
     "dataset_import":{"formats":["CSV","JSON array or object","JSONL"],"encoding":["identity","gzip"],"maximum_bytes":MAX_IMPORT_BYTES,"maximum_chunk_bytes":MAX_IMPORT_CHUNK,"resume":"Reuse the import id and continue at the returned byte offset; failed parsing can be retried with POST /api/admin/datasets/imports/{id}/resume"}
@@ -526,6 +529,66 @@ def host_authorization(ip:str,x_admin_token:Annotated[str|None,Header()]=None):
         if address.version==network.version and address in network:
             return {"authorized":True,"authorization_id":row["id"],"name":row["name"],"cidr":row["cidr"]}
     return {"authorized":False,"authorization_id":None,"name":None,"cidr":None}
+
+def _require_authorized_indexed_host(db,address):
+    host=db.execute("SELECT ip FROM hosts WHERE ip=?",(str(address),)).fetchone()
+    if not host:raise HTTPException(404,"Screenshots can only be attached to an indexed host")
+    for row in db.execute("SELECT id,cidr FROM authorizations WHERE enabled=1"):
+        try:network=ipaddress.ip_network(row["cidr"],strict=False)
+        except ValueError:continue
+        if address.version==network.version and address in network:return row["id"]
+    raise HTTPException(403,"A currently enabled authorization must cover this host")
+
+@app.post("/api/admin/hosts/{ip}/screenshots")
+async def upload_host_screenshot(ip:str,request:Request,
+        x_screenshot_name:Annotated[str,Header(min_length=1,max_length=120)],
+        x_screenshot_note:Annotated[str,Header(max_length=500)]="",
+        x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    try:address=ipaddress.ip_address(ip)
+    except ValueError as exc:raise HTTPException(400,"Invalid IP address") from exc
+    declared=request.headers.get("content-type","").split(";",1)[0].lower()
+    if declared not in {"image/png","image/jpeg"}:raise HTTPException(415,"Only PNG and JPEG screenshots are accepted")
+    content=bytearray()
+    async for chunk in request.stream():
+        content.extend(chunk)
+        if len(content)>MAX_SCREENSHOT_BYTES:raise HTTPException(413,"Screenshot exceeds the configured size limit")
+    image=bytes(content)
+    if not image:raise HTTPException(400,"Screenshot file is empty")
+    valid=(declared=="image/png" and image.startswith(b"\x89PNG\r\n\x1a\n")) or (declared=="image/jpeg" and image.startswith(b"\xff\xd8\xff"))
+    if not valid:raise HTTPException(415,"File contents do not match PNG or JPEG image data")
+    filename=Path(unquote(x_screenshot_name).replace("\\","/")).name.strip()[:120] or "screenshot"
+    with connection() as db:
+        auth_id=_require_authorized_indexed_host(db,address)
+        created=utc_now();checksum=hashlib.sha256(image).hexdigest()
+        note=unquote(x_screenshot_note)[:500]
+        cur=db.execute("INSERT INTO host_screenshots(ip,filename,media_type,sha256,image,note,created_at,created_by) VALUES(?,?,?,?,?,?,?,'admin')",(str(address),filename,declared,checksum,image,note,created))
+        audit(db,"screenshot.uploaded",{"screenshot_id":cur.lastrowid,"ip":str(address),"authorization_id":auth_id,"sha256":checksum})
+    return {"id":cur.lastrowid,"ip":str(address),"filename":filename,"media_type":declared,"sha256":checksum,"note":note,"created_at":created}
+
+@app.get("/api/admin/screenshots")
+def list_host_screenshots(x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token);results=[]
+    with connection() as db:
+        rows=db.execute("SELECT id,ip,filename,media_type,sha256,note,created_at FROM host_screenshots ORDER BY id DESC LIMIT 500").fetchall()
+        authorized=[dict(row) for row in db.execute("SELECT cidr FROM authorizations WHERE enabled=1")]
+    for row in rows:
+        address=ipaddress.ip_address(row["ip"])
+        for scope in authorized:
+            try:network=ipaddress.ip_network(scope["cidr"],strict=False)
+            except ValueError:continue
+            if address.version==network.version and address in network:
+                results.append(dict(row));break
+    return {"screenshots":results,"privacy":"Administrator-only; assets are listed and served only while covered by an enabled authorization.","maximum_bytes":MAX_SCREENSHOT_BYTES}
+
+@app.get("/api/admin/screenshots/{screenshot_id}/content")
+def get_host_screenshot(screenshot_id:int,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:
+        row=db.execute("SELECT * FROM host_screenshots WHERE id=?",(screenshot_id,)).fetchone()
+        if not row:raise HTTPException(404,"Screenshot not found")
+        _require_authorized_indexed_host(db,ipaddress.ip_address(row["ip"]))
+    return Response(content=row["image"],media_type=row["media_type"],headers={"Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff","Content-Disposition":f'inline; filename="{row["filename"]}"'})
 
 @app.post("/api/admin/authorizations/{auth_id}/revoke")
 def revoke_auth(auth_id:int,x_admin_token:Annotated[str|None,Header()]=None):

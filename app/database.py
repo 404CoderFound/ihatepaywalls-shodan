@@ -221,6 +221,12 @@ def init_db(seed_demo: bool = False) -> None:
           observed_at TEXT NOT NULL, UNIQUE(host_ip,cve,evidence_json),
           FOREIGN KEY(host_ip) REFERENCES hosts(ip), FOREIGN KEY(cve) REFERENCES vulnerabilities(cve)
         );
+        CREATE TABLE IF NOT EXISTS host_screenshots (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT NOT NULL, filename TEXT NOT NULL,
+          media_type TEXT NOT NULL, sha256 TEXT NOT NULL, image BLOB NOT NULL,
+          note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, created_by TEXT NOT NULL DEFAULT 'admin'
+        );
+        CREATE INDEX IF NOT EXISTS idx_host_screenshots_ip ON host_screenshots(ip,created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_host_vuln_host ON host_vulnerability_matches(host_ip,cve);
         CREATE TABLE IF NOT EXISTS intelligence_provider_state (
           provider TEXT PRIMARY KEY, last_attempt_at TEXT NOT NULL, last_success_at TEXT NOT NULL DEFAULT '',
