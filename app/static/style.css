@@ -9,3 +9,43 @@
 .mainnav nav{display:flex;gap:12px;max-width:100%;overflow-x:auto;white-space:nowrap;scrollbar-width:thin}.mainnav .navinner{min-width:0}.mainnav nav a{flex:0 0 auto}@media(max-width:760px){.mainnav nav{width:100%;margin:0;padding:4px 0 6px}.navinner{overflow:hidden}}
 .world-map-wrap{margin:16px 0 24px;border:1px solid var(--line);background:#0a121a;overflow:hidden}.world-map{display:block;width:100%;height:auto;min-height:220px}.world-country{stroke:#546474;stroke-width:.55;stroke-linejoin:round;cursor:pointer;transition:fill .12s,stroke .12s}.world-country:hover{fill:#a6dcff!important;stroke:#fff;stroke-width:1.1}.map-grid{stroke:#344451;stroke-width:.5;stroke-dasharray:2 5;opacity:.55}.map-status{padding:10px 14px;border-top:1px solid var(--line);font:12px var(--mono);color:var(--accent)}.map-attribution{font-size:11px;color:var(--muted)}
 .screenshot-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px;margin:18px 0}.screenshot-card{border:1px solid var(--line);background:var(--panel);padding:10px;min-width:0}.screenshot-card img{display:block;width:100%;aspect-ratio:16/10;object-fit:contain;background:#080d12;border:1px solid var(--line)}.screenshot-card b,.screenshot-card small{display:block;margin-top:8px}.screenshot-card small{color:var(--muted);overflow-wrap:anywhere}.screenshot-card p{font-size:12px}.screenshot-card code{font-size:10px;color:var(--accent)}
+
+
+/* SCANLATTICE NAVIGATION FIX V1 */
+.mainnav .navinner {
+    flex-wrap: wrap;
+    row-gap: 10px;
+    padding-top: 12px;
+    padding-bottom: 12px;
+}
+
+.mainnav .navsearch {
+    flex: 1 1 260px;
+    max-width: 440px;
+}
+
+.mainnav nav {
+    order: 4;
+    flex: 1 0 100%;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: visible;
+    white-space: normal;
+    flex-wrap: wrap;
+    gap: 9px 15px;
+    padding: 3px 0;
+}
+
+@media (max-width: 760px) {
+    .mainnav .navsearch {
+        max-width: none;
+        order: 3;
+        flex-basis: 100%;
+    }
+
+    .mainnav nav {
+        order: 4;
+        flex-basis: 100%;
+        margin: 0;
+    }
+}

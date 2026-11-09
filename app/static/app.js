@@ -100,7 +100,7 @@ function hostCard(host) {
     <div class="org">${esc(host.hostname || host.hostnames?.[0]?.hostname || "No hostname")} · ${esc(host.asn || "Unknown ASN")} · ${esc(host.org || "Unknown organization")}</div>
     <div class="meta">First seen: ${esc(host.first_seen)} · Last observed: ${esc(host.last_seen)} · Source: ${esc(host.source || "indexed observation")}${host.network_prefix ? ` · Prefix: ${esc(host.network_prefix)}` : ""}</div>
     <div>${services.map(service => `<span class="service">${service.port}/${esc(service.proto)} ${esc(service.service || service.product || "unknown")}</span>`).join("") || '<span class="service">NO INDEXED SERVICES</span>'}</div>
-    ${services.slice(0,3).map(service => `<div class="service-detail"><b>${service.port}/${esc(service.proto)} ${esc(service.product || service.service || "")}</b><span>${esc(service.banner || service.http?.status || "No banner metadata")}</span><small>Observed ${esc(service.last_seen)} · ${esc(service.source)}</small></div>`).join("")}
+    ${services.slice(0,3).map(service => `<div class="service-detail"><b>${service.port}/${esc(service.proto)} ${esc(service.product || service.service || "")}</b><span>${esc(String(service.banner || service.http?.status || "No banner metadata").replace(/\\r\\n|\\n|\\r/g, "\n"))}</span><small>Observed ${esc(service.last_seen)} · ${esc(service.source)}</small></div>`).join("")}
   </article>`;
 }
 
@@ -218,8 +218,8 @@ async function loadHost(ip) {
     const data = await api(`/api/hosts/${encodeURIComponent(ip)}`);
     const host = data.host;
     const history = await api(`/api/hosts/${encodeURIComponent(ip)}/observations?page=1&limit=50`);
-    const observations = data.latest_by_port.map(row => `<article class="observation"><h3>${row.port}/${esc(row.proto)} — ${esc(row.product || row.service || "Unknown service")}</h3><div class="meta">HISTORICAL OBSERVATION · ${esc(row.seen_at)} · ${esc(row.source)}</div><pre>${esc(row.banner || "No banner collected")}</pre><details><summary>HTTP / TLS / CPE metadata</summary><pre>${esc(JSON.stringify({http:row.http,tls:row.tls,cpe:row.cpe,ssh_id:row.ssh_id},null,2))}</pre></details></article>`).join("");
-    const timeline = history.results.map(row=>`<div class="service-detail"><b>${row.port}/${esc(row.proto)} ${esc(row.product||row.service)}</b><span>${esc(row.banner)}</span><small>${esc(row.seen_at)} · ${esc(row.source)}</small></div>`).join("");
+    const observations = data.latest_by_port.map(row => `<article class="observation"><h3>${row.port}/${esc(row.proto)} — ${esc(row.product || row.service || "Unknown service")}</h3><div class="meta">HISTORICAL OBSERVATION · ${esc(row.seen_at)} · ${esc(row.source)}</div><pre>${esc(String(row.banner || "No banner collected").replace(/\\r\\n|\\n|\\r/g, "\n"))}</pre><details><summary>HTTP / TLS / CPE metadata</summary><pre>${esc(JSON.stringify({http:row.http,tls:row.tls,cpe:row.cpe,ssh_id:row.ssh_id},null,2))}</pre></details></article>`).join("");
+    const timeline = history.results.map(row=>`<div class="service-detail"><b>${row.port}/${esc(row.proto)} ${esc(row.product||row.service)}</b><span>${esc(String(row.banner ?? "").replace(/\\r\\n|\\n|\\r/g, "\n"))}</span><small>${esc(row.seen_at)} · ${esc(row.source)}</small></div>`).join("");
     const passive = data.passive_intelligence.map(passiveCard).join("");
     const potential=(data.potential_vulnerabilities||[]).map(v=>`<article class="observation"><h3>${esc(v.cve)} · Potential match</h3><div class="meta">Source: ${esc(v.source)} · Observed: ${esc(v.observed_at)}</div><pre>${esc(JSON.stringify(v.evidence,null,2))}</pre></article>`).join("");
     let scanAction="";
