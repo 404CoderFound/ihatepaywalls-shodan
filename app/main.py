@@ -19,6 +19,7 @@ from .enrichment import enrichment_target, ensure_enrichment, queue_job, recover
 from .rate_limit import FixedWindowLimiter
 from .intelligence import MAX_IMPORT_BYTES, MAX_IMPORT_CHUNK, router as intelligence_router
 from .monitoring import create_event, start_scheduler as start_monitoring_scheduler
+from .result_batches import BatchFinish, accept_batch, finish_batches
 from .index_scheduler import (
     create_refresh_request, get_refresh_request, list_generations, list_refresh_requests,
     list_tasks, sync_generation_states,
@@ -305,6 +306,12 @@ def progress(jid:str,p:LeaseAction,x_worker_token:Annotated[str|None,Header()]=N
 
 class Observation(BaseModel):
     ip:str;port:int=Field(ge=1,le=65535);proto:str=Field(default="tcp",pattern="^(tcp|udp)$");hostname:str=Field(default="",max_length=253);asn:str=Field(default="",max_length=40);org:str=Field(default="",max_length=160);country:str=Field(default="",max_length=8);service:str=Field(default="",max_length=80);product:str=Field(default="",max_length=160);banner:str=Field(default="",max_length=8192);source:str=Field(default="manual",max_length=200);http:dict[str,Any]=Field(default_factory=dict);tls:dict[str,Any]=Field(default_factory=dict);ssh_id:str=Field(default="",max_length=500);latency_ms:float|None=Field(default=None,ge=0,le=120000);observed_at:str=Field(default="",max_length=64);cpe:str=Field(default="",max_length=500);os_name:str=Field(default="",max_length=160)
+class BatchUpload(BaseModel):
+    lease_token:str=Field(min_length=10,max_length=200)
+    batch_index:int=Field(ge=0,le=1000000)
+    checks_done:int=Field(ge=1)
+    observations:list[Observation]=Field(default_factory=list,max_length=64)
+
 class Results(BaseModel):
     lease_token:str;idempotency_key:str=Field(min_length=8,max_length=200);observations:list[Observation]=Field(default_factory=list,max_length=10000);completed_checks:int|None=Field(default=None,ge=0)
 
@@ -401,6 +408,83 @@ def store(db,rows:list[Observation],source:str,jid=None,wid=None):
         if r.hostname:db.execute("INSERT INTO hostnames(ip,hostname,source,first_seen,last_seen) VALUES(?,?,?,?,?) ON CONFLICT(ip,hostname,source) DO UPDATE SET last_seen=excluded.last_seen",(r.ip,r.hostname.lower(),source,now,now))
     return len(rows)
 
+
+def _notify_missing_batch_services(db, job):
+    """Mirror v1 service-disappeared monitoring after a complete batched scan."""
+    target = ipaddress.ip_network(job["target"], strict=False)
+    ports = json.loads(job["ports"])
+    start = f"{int(target.network_address):032x}"
+    end = f"{int(target.broadcast_address):032x}"
+    placeholders = ",".join("?" for _ in ports)
+    prior_services = db.execute(
+        f"SELECT s.host_ip,s.port,s.proto,s.service,s.product,s.last_seen "
+        f"FROM services s JOIN hosts h ON h.ip=s.host_ip "
+        f"WHERE h.ip_version=? AND h.ip_hex BETWEEN ? AND ? AND s.port IN ({placeholders})",
+        [target.version, start, end, *ports],
+    ).fetchall()
+    seen = {(row["ip"], row["port"], row["proto"]) for row in db.execute(
+        "SELECT DISTINCT ip,port,proto FROM observations WHERE scan_job_id=?", (job["id"],),
+    ).fetchall()}
+    monitors = [dict(row) for row in db.execute("SELECT * FROM monitor_targets WHERE enabled=1")]
+    for service in prior_services:
+        if (service["host_ip"], service["port"], service["proto"]) in seen:
+            continue
+        details = {"port": service["port"], "protocol": service["proto"],
+                   "service": service["service"], "product": service["product"],
+                   "last_observed_at": service["last_seen"], "scan_job_id": job["id"]}
+        for monitor in monitors:
+            if service["port"] in ports and ipaddress.ip_address(service["host_ip"]) in ipaddress.ip_network(monitor["target"], strict=False):
+                create_event(db, monitor, service["host_ip"], "service_disappeared",
+                             details, "active-scan", utc_now())
+
+
+
+@app.get("/api/worker/jobs/{jid}/results/batches/status")
+def result_batch_status(jid: str, x_worker_token: Annotated[str | None, Header()] = None):
+    with connection() as db:
+        w = worker(db, x_worker_token)
+        job = db.execute("SELECT * FROM scan_jobs WHERE id=? AND assigned_worker_id=?", (jid, w["id"])).fetchone()
+        if not job or job["status"] != "running" or (job["lease_expires_at"] or 0) < int(time.time()):
+            raise HTTPException(409, "Job lease is invalid or expired")
+        if not db.execute("SELECT 1 FROM authorizations WHERE id=? AND enabled=1",
+                          (job["authorization_id"],)).fetchone():
+            raise HTTPException(409, "Target authorization was revoked")
+        state = db.execute("SELECT COUNT(*) AS batch_count,COALESCE(MAX(checks_done),0) AS checks_done "
+                           "FROM scan_result_batches WHERE job_id=?", (jid,)).fetchone()
+        db.execute("UPDATE workers SET last_seen=? WHERE id=?", (int(time.time()), w["id"]))
+    return {"status": "running", "batch_count": state["batch_count"],
+            "checks_done": state["checks_done"], "progress_total": job["progress_total"]}
+
+
+@app.post("/api/worker/jobs/{jid}/results/batches")
+def upload_result_batch(jid: str, p: BatchUpload, x_worker_token: Annotated[str | None, Header()] = None):
+    with connection() as db:
+        w = worker(db, x_worker_token)
+        j = leased(db, jid, w["id"], p.lease_token)
+        # Pydantic validates the same Observation schema as the v1 result route.
+        result = accept_batch(db, j, w["id"], p.batch_index, p.checks_done, p.observations, store, LEASE)
+        sync_generation_states(db)
+    return result
+
+
+@app.post("/api/worker/jobs/{jid}/results/complete")
+def complete_result_batches(jid: str, p: BatchFinish, x_worker_token: Annotated[str | None, Header()] = None):
+    with connection() as db:
+        w = worker(db, x_worker_token)
+        j = db.execute("SELECT * FROM scan_jobs WHERE id=? AND assigned_worker_id=?", (jid, w["id"])).fetchone()
+        if j is None:
+            raise HTTPException(409, "Job is not assigned to this worker")
+        if j["status"] != "completed":
+            j = leased(db, jid, w["id"], p.lease_token)
+            if not db.execute("SELECT 1 FROM authorizations WHERE id=? AND enabled=1",
+                              (j["authorization_id"],)).fetchone():
+                raise HTTPException(409, "Target authorization was revoked")
+        result = finish_batches(db, j, w["id"], p.batch_count, p.completed_checks,
+                                _notify_missing_batch_services)
+        sync_generation_states(db)
+    return result
+
+
 @app.post("/api/worker/jobs/{jid}/results")
 def results(jid:str,p:Results,x_worker_token:Annotated[str|None,Header()]=None):
     with connection() as db:
@@ -410,6 +494,8 @@ def results(jid:str,p:Results,x_worker_token:Annotated[str|None,Header()]=None):
         if not auth:raise HTTPException(409,"Target authorization was revoked")
         target=ipaddress.ip_network(j["target"]);allowed=ipaddress.ip_network(auth[0]);ports=json.loads(j["ports"])
         if any(ipaddress.ip_address(r.ip) not in target or ipaddress.ip_address(r.ip) not in allowed or r.port not in ports for r in p.observations):raise HTTPException(400,"Result outside authorized job scope")
+        if db.execute("SELECT 1 FROM scan_result_batches WHERE job_id=?", (jid,)).fetchone():
+            raise HTTPException(409, "This job already uses batched result uploads")
         count=store(db,p.observations,"active-scan",jid,w["id"])
         if p.completed_checks is not None and p.completed_checks==j["progress_total"]:
             start=f"{int(target.network_address):032x}";end=f"{int(target.broadcast_address):032x}"
@@ -428,7 +514,8 @@ def results(jid:str,p:Results,x_worker_token:Annotated[str|None,Header()]=None):
 def fail(jid:str,p:LeaseAction,x_worker_token:Annotated[str|None,Header()]=None):
     with connection() as db:
         w=worker(db,x_worker_token);j=leased(db,jid,w["id"],p.lease_token);task=db.execute("SELECT id,attempt_count FROM scan_tasks WHERE scan_job_id=?",(jid,)).fetchone();now=int(time.time());timestamp=utc_now()
-        if task and j["attempts"]<j["max_attempts"]:
+        batched=bool(db.execute("SELECT 1 FROM scan_result_batches WHERE job_id=?",(jid,)).fetchone())
+        if (task or batched) and j["attempts"]<j["max_attempts"]:
             delay=min(300,5*(2**max(0,int(j["attempts"])-1)))
             db.execute("UPDATE scan_jobs SET status='queued',assigned_worker_id=NULL,error=?,updated_at=?,completed_at=NULL,lease_expires_at=NULL,lease_token=NULL WHERE id=?",(p.error or "Worker reported failure; retry scheduled",timestamp,jid))
             db.execute("UPDATE scan_tasks SET available_at=?,error=?,updated_at=? WHERE id=?",(now+delay,p.error or "Worker reported failure; retry scheduled",timestamp,task["id"]))
