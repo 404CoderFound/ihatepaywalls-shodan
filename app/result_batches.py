@@ -62,6 +62,7 @@ def accept_batch(db, job, worker_id: str, batch_index: int, checks_done: int,
     if previous:
         if previous["payload_hash"] != raw or previous["checks_done"] != checks_done:
             raise HTTPException(409, "Batch index was already committed with different contents")
+        db.execute("UPDATE workers SET last_seen=? WHERE id=?", (int(time.time()), worker_id))
         return {"status": "already_processed", "batch_index": batch_index,
                 "indexed": previous["observation_count"], "checks_done": checks_done}
 
@@ -97,6 +98,7 @@ def accept_batch(db, job, worker_id: str, batch_index: int, checks_done: int,
             raise HTTPException(400, "Result outside authorized TCP job scope")
 
     indexed = store(db, observations, "active-scan", job["id"], worker_id)
+    db.execute("UPDATE workers SET last_seen=? WHERE id=?", (int(time.time()), worker_id))
     db.execute(
         "INSERT INTO scan_result_batches"
         "(job_id,batch_index,payload_hash,checks_done,observation_count,created_at)"
@@ -150,5 +152,5 @@ def finish_batches(db, job, worker_id: str, batch_count: int, completed_checks: 
         "completed_at=?,updated_at=?,lease_token=NULL,lease_expires_at=NULL WHERE id=?",
         (timestamp, timestamp, job["id"]),
     )
-    db.execute("UPDATE workers SET completed_jobs=completed_jobs+1 WHERE id=?", (worker_id,))
+    db.execute("UPDATE workers SET completed_jobs=completed_jobs+1,last_seen=? WHERE id=?", (int(time.time()), worker_id))
     return {"status": "completed", "indexed": total["indexed"]}

@@ -451,6 +451,7 @@ def result_batch_status(jid: str, x_worker_token: Annotated[str | None, Header()
             raise HTTPException(409, "Target authorization was revoked")
         state = db.execute("SELECT COUNT(*) AS batch_count,COALESCE(MAX(checks_done),0) AS checks_done "
                            "FROM scan_result_batches WHERE job_id=?", (jid,)).fetchone()
+        db.execute("UPDATE workers SET last_seen=? WHERE id=?", (int(time.time()), w["id"]))
     return {"status": "running", "batch_count": state["batch_count"],
             "checks_done": state["checks_done"], "progress_total": job["progress_total"]}
 
