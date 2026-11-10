@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import ipaddress
 import sqlite3
+import re
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,6 +59,13 @@ def connection():
 
 
 def _columns(db: sqlite3.Connection, table: str) -> set[str]:
+    if os.getenv("DATABASE_BACKEND", "sqlite").lower() in {"postgres", "postgresql"}:
+        if not re.fullmatch(r"[a-z_][a-z0-9_]*", table):
+            raise ValueError("Invalid table name")
+        return {row[0] for row in db.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=?",
+            (table,),
+        )}
     return {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
 
 
@@ -68,12 +76,27 @@ def _add_columns(db: sqlite3.Connection, table: str, definitions: dict[str, str]
             db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
 
+def _migrate_postgresql(db) -> None:
+    """Apply ordered, transactional PostgreSQL schema migrations once."""
+    db.execute("SELECT pg_advisory_xact_lock(20261110, 1)")
+    db.execute("CREATE TABLE IF NOT EXISTS schema_migrations(version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
+    migration_dir = Path(__file__).resolve().parent.parent / "migrations" / "postgresql"
+    for migration in sorted(migration_dir.glob("*.sql")):
+        version = migration.name.split("_", 1)[0]
+        if db.execute("SELECT 1 FROM schema_migrations WHERE version=?", (version,)).fetchone():
+            continue
+        db.executescript(migration.read_text(encoding="utf-8"))
+        db.execute("INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)", (version, utc_now()))
+
+
 def init_db(seed_demo: bool = False) -> None:
     with connection() as db:
-        if os.getenv("DATABASE_BACKEND", "sqlite").lower() != "sqlite":
-            raise RuntimeError("Schema migrations are SQLite-specific until a PostgreSQL migration is implemented")
-        db.execute("PRAGMA journal_mode=WAL")
-        db.executescript("""
+        backend_name = os.getenv("DATABASE_BACKEND", "sqlite").lower()
+        if backend_name in {"postgres", "postgresql"}:
+            _migrate_postgresql(db)
+        else:
+            db.execute("PRAGMA journal_mode=WAL")
+            db.executescript("""
         CREATE TABLE IF NOT EXISTS observations (
           id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT NOT NULL, port INTEGER NOT NULL,
           proto TEXT NOT NULL DEFAULT 'tcp', asn TEXT NOT NULL DEFAULT '', org TEXT NOT NULL DEFAULT '',
@@ -320,7 +343,7 @@ def init_db(seed_demo: bool = False) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_scan_tasks_generation ON scan_tasks(generation_id,status);
         CREATE INDEX IF NOT EXISTS idx_scan_tasks_queue ON scan_tasks(status,available_at,created_at);
-        """)
+            """)
         _add_columns(db, "observations", {
             "hostname": "TEXT NOT NULL DEFAULT ''", "service": "TEXT NOT NULL DEFAULT ''",
             "http_json": "TEXT NOT NULL DEFAULT '{}'", "tls_json": "TEXT NOT NULL DEFAULT '{}'",
@@ -384,7 +407,11 @@ def init_db(seed_demo: bool = False) -> None:
             ]
             db.executemany("INSERT INTO observations(ip,port,proto,asn,org,country,product,banner,source,seen_at,is_demo,service) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", samples)
             for row in samples:
-                db.execute("INSERT OR REPLACE INTO hosts(ip,asn,org,country,first_seen,last_seen,is_demo) VALUES(?,?,?,?,?,?,1)", (row[0],row[3],row[4],row[5],now,now))
+                db.execute("""INSERT INTO hosts(ip,asn,org,country,first_seen,last_seen,is_demo)
+                  VALUES(?,?,?,?,?,?,1) ON CONFLICT(ip) DO UPDATE SET asn=excluded.asn,
+                  org=excluded.org,country=excluded.country,first_seen=excluded.first_seen,
+                  last_seen=excluded.last_seen,is_demo=excluded.is_demo""",
+                  (row[0],row[3],row[4],row[5],now,now))
         # Backfill normalized records for databases created by v0.1. The
         # append-only observations table remains the historical source.
         db.execute("""INSERT OR IGNORE INTO hosts(ip,hostname,asn,org,country,first_seen,last_seen,is_demo)
@@ -416,7 +443,7 @@ def init_db(seed_demo: bool = False) -> None:
             if matches:
                 network,mapping=max(matches,key=lambda item:item[0].prefixlen)
                 db.execute("UPDATE hosts SET network_prefix=?,asn=CASE WHEN asn='' THEN ? ELSE asn END,org=CASE WHEN org='' THEN ? ELSE org END WHERE ip=?",(str(network),mapping["asn"],mapping["organization"],host["ip"]))
-        for table in ("hosts","observations","passive_records","routing_prefixes"):
-            for row in db.execute(f"SELECT rowid AS migration_rowid,asn FROM {table} WHERE asn!=''").fetchall():
+        for table, key_column in (("hosts", "ip"), ("observations", "id"), ("passive_records", "id"), ("routing_prefixes", "id")):
+            for row in db.execute(f"SELECT {key_column} AS migration_key,asn FROM {table} WHERE asn!=''").fetchall():
                 value=row["asn"].upper();number=value.removeprefix("AS")
-                if number.isdigit():db.execute(f"UPDATE {table} SET asn=? WHERE rowid=?",(f"AS{int(number)}",row["migration_rowid"]))
+                if number.isdigit():db.execute(f"UPDATE {table} SET asn=? WHERE {key_column}=?",(f"AS{int(number)}",row["migration_key"]))

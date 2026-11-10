@@ -26,7 +26,7 @@ Status records what is implemented in this checkout, not parity with a commercia
 
 | Feature | Status |
 |---|---|
-| Database backend seam | `DatabaseBackend`/`ConnectionProtocol` with SQLite implementation is active by default; other backend names fail explicitly. Existing `connection()` call sites and SQLite files are preserved. SQL/migrations are still SQLite-specific; PostgreSQL is not yet supported. |
+| Database backend | SQLite remains the default; PostgreSQL now has a psycopg compatibility backend, versioned schema bootstrap, isolated staging Compose profile, CI suite, and resumable SQLite snapshot importer. PostgreSQL CI and Docker staging have not yet run in this environment; full production parity and native INET/JSONB tuning remain incomplete. |
 | Persistent generations/tasks | Additive `scan_generations`, `scan_refresh_requests`, and `scan_tasks` tables link each bounded v2 task to a legacy `scan_jobs` row. Request/task idempotency keys and state/status APIs are implemented. |
 | Bounded query planning | Admin refresh supports normalized IP, CIDR, ASN and optional port filters. CIDR/ASN select already-indexed hosts only; configured host and host/port caps apply; enabled authorizations filter tasks. Revocation cancels queued/running jobs, and claim/start recheck authorization. No prefix expansion or public-search refresh side effect. |
 | Worker leases/retries | Existing v1 claim/start/progress/results API remains the execution path. V2 task state mirrors the v1 job lease; lost workers and task failures retry with delay up to the existing job attempt limit. Existing v1 failure behavior is unchanged. |
@@ -47,4 +47,4 @@ Status records what is implemented in this checkout, not parity with a commercia
 
 - Full suite: 69 passed, 1 skipped, 3 framework/client warnings. The skipped test remains the opt-in live RIPEstat integration; no provider calls were made.
 - v2 scheduler regression tests cover the new DB tables and APIs while all v1 tests continue to pass.
-- PostgreSQL, Docker, and production database migration were not performed. See `V2_INDEX_SCHEDULER.md` for compatibility and rollback instructions.
+- PostgreSQL Docker staging and production database migration were not performed. PostgreSQL support is under development; see `POSTGRES_MIGRATION_PLAN.md` for parity and rollout gates.

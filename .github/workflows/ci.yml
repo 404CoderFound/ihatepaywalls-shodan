@@ -27,3 +27,45 @@ jobs:
           STAGING_ADMIN_TOKEN: ci-staging-only-admin-secret
           STAGING_ENROLLMENT_TOKEN: ci-staging-only-enrollment-secret
           STAGING_PORT: '18080'
+      - run: scripts/validate_postgresql_staging.sh
+        env:
+          STAGING_ADMIN_TOKEN: ci-postgresql-staging-only-admin
+          STAGING_ENROLLMENT_TOKEN: ci-postgresql-staging-only-enrollment
+          STAGING_POSTGRES_PASSWORD: ci-postgresql-staging-only-password
+          STAGING_PORT: '18081'
+  postgresql:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: scanlattice
+          POSTGRES_USER: scanlattice
+          POSTGRES_PASSWORD: ci-postgresql-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U scanlattice -d scanlattice"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_BACKEND: postgresql
+      DATABASE_URL: postgresql://scanlattice:ci-postgresql-only-password@localhost:5432/scanlattice
+      SEED_DEMO: 'false'
+      PASSIVE_ENRICHMENT_ENABLED: 'false'
+      MONITORING_AUTO_CHECKS: 'false'
+      VULNERABILITY_AUTO_REFRESH: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python -m pip install -r requirements.txt
+      - run: pytest -q
+      - run: python -m py_compile app/*.py sdk/client.py cli.py
+      - run: node --check app/static/app.js && node --check app/static/insights.js

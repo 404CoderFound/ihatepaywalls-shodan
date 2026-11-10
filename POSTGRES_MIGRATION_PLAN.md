@@ -1,6 +1,8 @@
 # PostgreSQL Migration Design (Plan Only)
 
-**Status:** design draft; no PostgreSQL code, migration, benchmark, or database connection is included in this branch. Begin implementation only after CI is runnable and isolated Docker staging passes. The current application remains SQLite-only.
+**Status:** PostgreSQL implementation in progress. This branch adds a psycopg connection backend, versioned PostgreSQL schema migrations, an isolated Docker staging profile, CI coverage, and a resumable SQLite snapshot importer. The existing SQLite suite remains the local default. Full PostgreSQL parity, Docker staging, restored v0.4/current snapshots, benchmarks, and rollback rehearsal are still required before this backend is production-ready. No production migration or cutover is in scope.
+
+The first compatibility increment retains the current logical schema and text-based IP/payload fields so v1 API and worker contracts can be exercised without changing their representations. Native `INET`/`CIDR`, `JSONB`, query-plan tuning, and workload benchmarks remain follow-up work after the unchanged API/worker suite passes against PostgreSQL.
 
 ## Goals and invariants
 

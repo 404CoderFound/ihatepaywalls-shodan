@@ -4,6 +4,6 @@ The WebServer remains the transactional control plane: FastAPI, SQLite/WAL, pass
 
 The scanner image remains separate and outbound-only. Only worker endpoints receive scan tasks, and authorization is checked when jobs are created and when results return. Passive provider calls are host allowlisted and never target discovered application services.
 
-Search and analytical reads use SQLite indexes and aggregates. Larger deployments can move the same logical records behind PostgreSQL/OpenSearch after measured data volumes justify operating them. Redis, ClickHouse, and object storage are not required for this single-node release.
+Search and analytical reads use indexed observations and aggregates. SQLite remains the default backend; an optional PostgreSQL backend and isolated staging profile are being added behind the existing connection seam. The first PostgreSQL increment preserves the current logical text/JSON representation to keep API and worker contracts stable. Native address/JSON types and search-index tuning require PostgreSQL parity and workload measurements before production use. Redis, ClickHouse, and object storage are not required for this single-node release.
 
 Evidence is kept with source, timestamps, collection method, confidence, and current/stale status. CVE/banner correlations are potential matches and never prove exploitation. Geolocation is approximate. DNS lookups explicitly identify direct resolver results.
