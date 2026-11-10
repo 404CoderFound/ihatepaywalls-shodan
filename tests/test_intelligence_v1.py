@@ -35,6 +35,32 @@ def test_api_key_lifecycle_and_read_only_scopes(system, admin_headers):
     assert client.get("/api/analytics/summary", headers={"Authorization": f"Bearer {token}"}).status_code == 401
 
 
+def test_saved_search_update_is_admin_only_and_updates_timestamp(system, admin_headers):
+    client, _, _ = system
+    payload = {"name": "TLS services", "query": "port:443"}
+    assert client.post("/api/admin/saved-searches", json=payload).status_code == 401
+    created = client.post("/api/admin/saved-searches", headers=admin_headers, json=payload)
+    assert created.status_code == 200
+    search_id = created.json()["id"]
+
+    updated = client.put(
+        f"/api/admin/saved-searches/{search_id}",
+        headers=admin_headers,
+        json={"name": "Dutch TLS services", "query": 'country:NL port:443'},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["name"] == "Dutch TLS services"
+    assert updated.json()["query"] == "country:NL port:443"
+    assert updated.json()["updated_at"] >= created.json()["created_at"]
+    assert client.put(
+        "/api/admin/saved-searches/9999", headers=admin_headers, json=payload
+    ).status_code == 404
+    assert client.put(
+        f"/api/admin/saved-searches/{search_id}", headers=admin_headers,
+        json={"name": "x", "query": ""},
+    ).status_code == 422
+
+
 def test_vulnerability_import_and_monitor_scope(system, admin_headers):
     client, _, _ = system
     body = {"source": "fixture-feed", "records": [{"cve": "CVE-2024-12345", "description": "Example CVE", "cvss": 8.2, "severity": "HIGH", "known_exploited": True}]}

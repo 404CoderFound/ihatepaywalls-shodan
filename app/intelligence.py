@@ -523,6 +523,21 @@ def saved_searches(request: Request):
         return {"searches": [dict(r) for r in db.execute("SELECT * FROM saved_searches ORDER BY updated_at DESC") ]}
 
 
+@router.put("/admin/saved-searches/{search_id}")
+def update_saved_search(search_id: int, payload: SavedSearchCreate, request: Request):
+    _admin(request)
+    now = utc_now()
+    with connection() as db:
+        cur = db.execute(
+            "UPDATE saved_searches SET name=?,query=?,updated_at=? WHERE id=?",
+            (payload.name, payload.query, now, search_id),
+        )
+        if cur.rowcount != 1:
+            raise HTTPException(404, "Saved search not found")
+        row = db.execute("SELECT * FROM saved_searches WHERE id=?", (search_id,)).fetchone()
+    return dict(row)
+
+
 @router.delete("/admin/saved-searches/{search_id}")
 def delete_saved_search(search_id: int, request: Request):
     _admin(request)
