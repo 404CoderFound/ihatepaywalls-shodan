@@ -7,7 +7,7 @@
 5. Python SDK/CLI, endpoint documentation, provider controls, import UI, offline interactive country map and authorized private screenshot library: implemented; automated capture remains external to the application.
 6. Isolated staging Compose, CI checks and validation script: defined. Local Docker runtime and restore tests are blocked by Docker unavailability and the lack of an operator-provided database copy.
 
-7. v2 index scheduler milestone: implemented on `feature/v2-index-scheduler`. The DB connection seam still selects SQLite only; additive generations, refresh requests and scan tasks reuse v1 worker jobs; bounded indexed-host planning, idempotency, lease/retry synchronization, protected admin status APIs and the Administration panel are covered by tests. Full suite: 69 passed, 1 opt-in provider test skipped. See `V2_INDEX_SCHEDULER.md`.
+7. v2 index scheduler milestone: implemented on `feature/v2-index-scheduler`. The DB connection seam defaults to SQLite; additive generations, refresh requests and scan tasks reuse v1 worker jobs; bounded indexed-host planning, idempotency, lease/retry synchronization, protected admin status APIs and the Administration panel are covered by tests. Full suite: 69 passed, 1 opt-in provider test skipped. See `V2_INDEX_SCHEDULER.md`.
 
 ## Release readiness checkpoint (2026-11-08)
 
@@ -25,3 +25,5 @@
 4. Validate actual NVD/KEV and approved passive-provider refreshes with operator credentials, quotas, and licensing/usage approval. Validate SMTP/webhook delivery and retry behavior.
 5. Resolve or explicitly accept the one skipped automated test and approve any remaining limitations in `FEATURE_CHECKLIST.md`.
 6. Review `MIGRATION_GUIDE.md`, backups, TLS/secure cookies, production secrets, provider/license requirements, and the production change plan. No production action is authorized or performed by this plan.
+
+8. PostgreSQL milestone: in progress on `feat/postgresql-backend-v1`. This branch adds a psycopg connection adapter, versioned schema bootstrap, PostgreSQL CI/staging configuration, dialect handling for existing search SQL, and a batch-resumable SQLite snapshot importer. Full backend tests and isolated Docker staging are pending; no migration or deployment has run.

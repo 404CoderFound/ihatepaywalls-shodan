@@ -182,6 +182,33 @@ docker compose -p scanlattice-staging -f compose.staging.yaml up -d --build
 
 To test a database copy, make a verified backup first, place only the copy in `scanlattice_staging_data`, and set `DATABASE_PATH` to its copied filename. Do not attach `web_scanlattice_data` or `worker_worker_state` to staging. This checkout has not been supplied with a production database copy, so no restore has been run.
 
+### PostgreSQL staging and migration
+
+PostgreSQL is an optional backend; SQLite remains the default. The PostgreSQL profile uses its own internal database service, project-scoped volume, staging secrets, and loopback-only web port. It does not read `.env` or attach production volumes. Validate it with fresh, staging-only credentials:
+
+```sh
+export STAGING_PROJECT="scanlattice-pg-$(date +%s)"
+export STAGING_PORT=18081
+export STAGING_ADMIN_TOKEN="$(openssl rand -hex 32)"
+export STAGING_ENROLLMENT_TOKEN="$(openssl rand -hex 32)"
+export STAGING_POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+scripts/validate_postgresql_staging.sh
+```
+
+The validator builds the PostgreSQL-backed web image, checks the API and schema migration, then runs the reserved-address staging E2E. It stops containers and preserves the project-scoped staging volume unless explicitly cleaned up. Never reuse a production project or volume name.
+
+To rehearse an existing SQLite migration, first make an authorized sanitized copy and point `DATABASE_URL` at a **new, disposable staging database**. The importer takes a consistent SQLite backup, streams batches, commits rowid cursors with each batch, and resumes using the source fingerprint. It refuses a non-empty target and requires the staging confirmation flag:
+
+```sh
+DATABASE_BACKEND=postgresql \
+DATABASE_URL='postgresql://scanlattice:<staging-password>@localhost:5432/scanlattice' \
+DATABASE_SCHEMA=public \
+python3 scripts/migrate_sqlite_to_postgresql.py /path/to/sanitized-copy.sqlite \
+  --schema public --target-is-disposable-staging
+```
+
+The source file is never modified. This rehearsal does not cut over a running application or authorize production migration. SQLite remains available for rollback; production adoption still requires a separately approved backup, restore, compatibility, load, and rollback exercise.
+
 ### Resumable dataset ingestion
 
 Admin clients upload the file as consecutive raw chunks to `POST /api/admin/datasets/imports`. Required headers are `X-Import-Id`, `X-Import-Source`, `X-Import-Format` (`csv`, `json`, or `jsonl`), `X-Import-Encoding` (`identity` or `gzip`) and `Content-Range: bytes START-END/TOTAL`. The response includes `resume_offset`; retry from that exact offset after interruption. `GET /api/admin/datasets/imports` reports progress and `POST /api/admin/datasets/imports/{id}/resume` retries processing after an interrupted or partially processed upload. Chunks default to at most 8 MiB; compressed file size defaults to at most 20 GiB. Import files are spooled below the configured database directory and retained for resumability.

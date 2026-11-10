@@ -1,0 +1,45 @@
+# Isolated PostgreSQL staging profile. It never reads .env or production volumes.
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: scanlattice
+      POSTGRES_USER: scanlattice
+      POSTGRES_PASSWORD: ${STAGING_POSTGRES_PASSWORD:?Set a staging-only PostgreSQL password}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scanlattice -d scanlattice"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - postgres_staging_data:/var/lib/postgresql/data
+    security_opt: ["no-new-privileges:true"]
+
+  web-staging:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_BACKEND: postgresql
+      DATABASE_URL: postgresql://scanlattice:${STAGING_POSTGRES_PASSWORD}@postgres:5432/scanlattice
+      DATABASE_SCHEMA: public
+      DATABASE_PATH: /tmp/unused-sqlite.db
+      ADMIN_TOKEN: ${STAGING_ADMIN_TOKEN:?Set a staging-only admin token}
+      ENROLLMENT_TOKEN: ${STAGING_ENROLLMENT_TOKEN:?Set a staging-only enrollment token}
+      SESSION_COOKIE_SECURE: "false"
+      PASSIVE_ENRICHMENT_ENABLED: "false"
+      MONITORING_AUTO_CHECKS: "false"
+      VULNERABILITY_AUTO_REFRESH: "false"
+      SEED_DEMO: "false"
+    ports:
+      - "127.0.0.1:${STAGING_PORT:-18081}:8080"
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+
+volumes:
+  postgres_staging_data:

@@ -52,7 +52,7 @@ The local HTTP run used `SESSION_COOKIE_SECURE=false` only for loopback transpor
 - Local `PRAGMA integrity_check`: **ok** on the fresh E2E database. `sh -n scripts/validate_staging.sh` and `git diff --check`: passed.
 - `scripts/validate_staging.sh` was invoked and exited **2** with “Docker is required for container validation.” `docker` and `docker compose` are absent. Container builds, image ownership inspection, isolated Compose E2E, and in-container integrity checks remain unverified.
 - Investigated CI run [42882609443](https://github.com/404CoderFound/ihatepaywalls-shodan/actions/runs/42882609443) for commit `5732e5a019b76822d7aece4b2d5364e004da9777`. The GitHub check annotation states that the job **was not started because the account is locked due to a billing issue**; runner ID is 0 and the job has no executed steps. This is not a code/test failure and cannot be fixed in the repo. Re-enable billing and rerun Actions before treating CI as passing.
-- `worker/Dockerfile` now uses `COPY --chown=10001:10001`. The Docker staging validator builds and checks the worker image without starting its scanner loop. See `POSTGRES_MIGRATION_PLAN.md` for the separately scoped PostgreSQL design; no PostgreSQL implementation or migration has been performed.
+- `worker/Dockerfile` now uses `COPY --chown=10001:10001`. The Docker staging validator builds and checks the worker image without starting its scanner loop. PostgreSQL groundwork is being implemented on a separate feature branch: its backend, schema, isolated profile, and importer are not yet validated by Docker or CI and are not part of this release-readiness result. See `POSTGRES_MIGRATION_PLAN.md` for the remaining gates.
 
 ## Docker tests still required
 

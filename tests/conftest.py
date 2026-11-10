@@ -1,5 +1,6 @@
 import importlib
 import os
+import re
 import pytest
 from fastapi.testclient import TestClient
 
@@ -9,9 +10,21 @@ os.environ.update({"ADMIN_TOKEN":"admin-test-token","ENROLLMENT_TOKEN":"enroll-t
 def system(tmp_path,monkeypatch):
     import app.database as database
     monkeypatch.setattr(database,"DB_PATH",tmp_path/"test.db")
+    postgres_schema = None
+    postgres_dsn = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_DSN")
+    if os.getenv("DATABASE_BACKEND", "sqlite").lower() in {"postgres", "postgresql"}:
+        postgres_schema = "test_" + re.sub(r"[^a-z0-9_]", "_", tmp_path.name.lower())[:54]
+        monkeypatch.setenv("DATABASE_SCHEMA", postgres_schema)
     import app.main as main
     main.ADMIN_TOKEN="admin-test-token";main.ENROLLMENT_TOKEN="enroll-test-token";main.OFFLINE=45;main.LEASE=90;main.COOKIE_SECURE=False;main.PUBLIC_RATE_LIMIT=60;main.ENRICHMENT_ENABLED=False;main.RATE_LIMITER.clear()
-    with TestClient(main.app) as client:yield client,main,database
+    try:
+        with TestClient(main.app) as client:
+            yield client,main,database
+    finally:
+        if postgres_schema:
+            import psycopg
+            with psycopg.connect(postgres_dsn) as db:
+                db.execute(f'DROP SCHEMA IF EXISTS "{postgres_schema}" CASCADE')
 
 @pytest.fixture
 def admin_headers():return {"X-Admin-Token":"admin-test-token"}

@@ -3,12 +3,19 @@ from __future__ import annotations
 import ipaddress
 import json
 import math
+import os
 import sqlite3
 from typing import Any
 
 from .search import ParsedQuery
 
 PER_PAGE = 10
+
+
+def _port_array_join() -> str:
+    if os.getenv("DATABASE_BACKEND", "sqlite").lower() in {"postgres", "postgresql"}:
+        return "CROSS JOIN LATERAL jsonb_array_elements_text(pr.value_json::jsonb->'ports') AS p(value)"
+    return "CROSS JOIN json_each(pr.value_json,'$.ports') AS p"
 
 
 def _where_group(filters,free) -> tuple[list[str],list[Any]]:
@@ -21,7 +28,7 @@ def _where_group(filters,free) -> tuple[list[str],list[Any]]:
             elif key == "org": clauses.append("LOWER(h.org) LIKE ?");params.append(f"%{value.lower()}%")
             elif key in {"hostname","domain"}:
                 clauses.append("(LOWER(h.hostname) LIKE ? OR EXISTS(SELECT 1 FROM hostnames hn WHERE hn.ip=h.ip AND LOWER(hn.hostname) LIKE ?))");params.extend([f"%{value.lower()}%"]*2)
-            elif key == "port": clauses.append("(EXISTS(SELECT 1 FROM services s WHERE s.host_ip=h.ip AND s.port=?) OR EXISTS(SELECT 1 FROM passive_records pr,json_each(pr.value_json,'$.ports') p WHERE pr.ip=h.ip AND pr.record_type='internetdb-host' AND CAST(p.value AS INTEGER)=?))");params.extend([int(value),int(value)])
+            elif key == "port": clauses.append("(EXISTS(SELECT 1 FROM services s WHERE s.host_ip=h.ip AND s.port=?) OR EXISTS(SELECT 1 FROM passive_records pr "+_port_array_join()+" WHERE pr.ip=h.ip AND pr.record_type='internetdb-host' AND CAST(p.value AS INTEGER)=?))");params.extend([int(value),int(value)])
             elif key == "service": clauses.append("EXISTS(SELECT 1 FROM services s WHERE s.host_ip=h.ip AND LOWER(s.service)=LOWER(?))");params.append(value)
             elif key == "product": clauses.append("EXISTS(SELECT 1 FROM services s WHERE s.host_ip=h.ip AND LOWER(s.product) LIKE ?)");params.append(f"%{value.lower()}%")
             elif key == "source": clauses.append("(LOWER(h.source)=LOWER(?) OR EXISTS(SELECT 1 FROM services s WHERE s.host_ip=h.ip AND LOWER(s.source)=LOWER(?)))");params.extend([value,value])
@@ -71,7 +78,7 @@ def search_hosts(db: sqlite3.Connection, parsed: ParsedQuery, page: int, sort: s
         host["hostnames"]=[dict(row) for row in db.execute("SELECT hostname,source,last_seen FROM hostnames WHERE ip=? ORDER BY last_seen DESC,hostname",(host["ip"],))]
     start=offset+1 if total else 0;end=min(offset+per_page,total)
     service_filter=where;passive_filter=where
-    port_query="SELECT port,COUNT(DISTINCT ip) hosts FROM (SELECT s.port port,s.host_ip ip FROM services s JOIN hosts h ON h.ip=s.host_ip"+service_filter+" UNION ALL SELECT CAST(p.value AS INTEGER) port,pr.ip ip FROM passive_records pr JOIN hosts h ON h.ip=pr.ip,json_each(pr.value_json,'$.ports') p WHERE pr.record_type='internetdb-host'"+(" AND "+passive_filter[7:] if passive_filter else "")+") GROUP BY port ORDER BY hosts DESC,port LIMIT 50"
+    port_query="SELECT port,COUNT(DISTINCT ip) hosts FROM (SELECT s.port port,s.host_ip ip FROM services s JOIN hosts h ON h.ip=s.host_ip"+service_filter+" UNION ALL SELECT CAST(p.value AS INTEGER) port,pr.ip ip FROM passive_records pr JOIN hosts h ON h.ip=pr.ip "+_port_array_join()+" WHERE pr.record_type='internetdb-host'"+(" AND "+passive_filter[7:] if passive_filter else "")+") GROUP BY port ORDER BY hosts DESC,port LIMIT 50"
     port_facets=[dict(r) for r in db.execute(port_query,params+params)]
     country_facets=[dict(r) for r in db.execute("SELECT h.country,COUNT(DISTINCT h.ip) hosts FROM hosts h"+where+" AND h.country!='' GROUP BY h.country ORDER BY hosts DESC LIMIT 50" if where else "SELECT h.country,COUNT(DISTINCT h.ip) hosts FROM hosts h WHERE h.country!='' GROUP BY h.country ORDER BY hosts DESC LIMIT 50",params)]
     product_facets=[dict(r) for r in db.execute("SELECT s.product,COUNT(DISTINCT s.host_ip) hosts FROM services s JOIN hosts h ON h.ip=s.host_ip"+where+" AND s.product!='' GROUP BY s.product ORDER BY hosts DESC LIMIT 50" if where else "SELECT s.product,COUNT(DISTINCT s.host_ip) hosts FROM services s JOIN hosts h ON h.ip=s.host_ip WHERE s.product!='' GROUP BY s.product ORDER BY hosts DESC LIMIT 50",params)]
@@ -85,7 +92,7 @@ def asn_intelligence(db: sqlite3.Connection, asn: str, prefix_page: int = 1, met
     organization=(overview_row["org"] if overview_row else "") or db.execute("SELECT COALESCE(MAX(org),'') FROM hosts WHERE asn=?",(asn,)).fetchone()[0]
     prefix_total=db.execute("SELECT COUNT(DISTINCT prefix) FROM routing_prefixes WHERE asn=?",(asn,)).fetchone()[0]
     prefix_pages=math.ceil(prefix_total/prefix_per_page) if prefix_total else 0;prefix_page=max(1,min(prefix_page,prefix_pages or 1))
-    prefixes=[dict(row) for row in db.execute("SELECT prefix,organization,source,last_seen FROM routing_prefixes WHERE asn=? GROUP BY prefix ORDER BY CASE WHEN instr(prefix,':')=0 THEN 4 ELSE 6 END,prefix LIMIT ? OFFSET ?",(asn,prefix_per_page,(prefix_page-1)*prefix_per_page))]
+    prefixes=[dict(row) for row in db.execute("SELECT prefix,MAX(organization) organization,MAX(source) source,MAX(last_seen) last_seen FROM routing_prefixes WHERE asn=? GROUP BY prefix ORDER BY CASE WHEN instr(prefix,':')=0 THEN 4 ELSE 6 END,prefix LIMIT ? OFFSET ?",(asn,prefix_per_page,(prefix_page-1)*prefix_per_page))]
     metadata_total=db.execute("SELECT COUNT(*) FROM passive_records WHERE asn=? AND record_type NOT IN ('announced-prefix','asn-overview','prefix-statistics')",(asn,)).fetchone()[0]
     metadata_pages=math.ceil(metadata_total/metadata_per_page) if metadata_total else 0;metadata_page=max(1,min(metadata_page,metadata_pages or 1))
     metadata=[dict(row) for row in db.execute("SELECT * FROM passive_records WHERE asn=? AND record_type NOT IN ('announced-prefix','asn-overview','prefix-statistics') ORDER BY observed_at DESC,id DESC LIMIT ? OFFSET ?",(asn,metadata_per_page,(metadata_page-1)*metadata_per_page))]

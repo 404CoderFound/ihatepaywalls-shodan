@@ -27,12 +27,15 @@ def _create(client, headers, profile_id, query="asn:64496 port:8443", key="v2-id
 
 def test_database_backend_seam_defaults_to_legacy_sqlite(system, monkeypatch):
     _, _, database = system
-    from app.db_backend import SQLiteBackend, configured_backend
+    from app.db_backend import PostgreSQLBackend, SQLiteBackend, configured_backend
     assert isinstance(configured_backend("sqlite"), SQLiteBackend)
     with database.connection() as db:
         assert db.execute("SELECT COUNT(*) FROM scan_jobs").fetchone()[0] == 0
+    assert isinstance(configured_backend("postgresql"), PostgreSQLBackend)
     monkeypatch.setenv("DATABASE_BACKEND", "postgresql")
-    with pytest.raises(RuntimeError, match="not implemented"):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("POSTGRES_DSN", raising=False)
+    with pytest.raises(RuntimeError, match="DATABASE_URL is required"):
         with database.connection():
             pass
 

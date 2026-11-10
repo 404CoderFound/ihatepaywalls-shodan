@@ -26,7 +26,7 @@ The existing Administration page has an “Asynchronous indexed refresh” form 
 
 ## Database and deployment
 
-`DATABASE_BACKEND=sqlite` remains the only supported backend. `app/db_backend.py` defines the connection/configuration protocol and SQLite implementation. Choosing PostgreSQL fails clearly rather than implying incomplete compatibility; query syntax, schema migrations, and SQLite-specific SQL still need deliberate PostgreSQL work.
+`DATABASE_BACKEND=sqlite` remains the default backend. The PostgreSQL connection backend, versioned bootstrap schema, compatibility SQL layer, isolated staging profile, CI service, and resumable SQLite snapshot importer are under development on the PostgreSQL milestone branch. Full backend parity and staging execution remain required before production use.
 
 `init_db()` additively creates `scan_generations`, `scan_refresh_requests`, and `scan_tasks`. It does not rewrite existing v1 `scan_jobs`, observations, authorizations, worker credentials, or results. Upgrade steps:
 
