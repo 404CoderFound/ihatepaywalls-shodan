@@ -36,13 +36,31 @@ Environment: macOS development checkout, commit base `8fffcb57c4e643a69703715318
 - `git diff --check`: passed.
 - Docker availability check: no `docker` or `docker-compose` executable found. **No container test passed or was claimed.**
 
+### CI failure investigation (2026-11-10)
+
+- GitHub Actions run [42882609443](https://github.com/404CoderFound/ihatepaywalls-shodan/actions/runs/42882609443), commit `5732e5a019b76822d7aece4b2d5364e004da9777`, concluded `failure` before a runner started. The public check-run annotation says: **“The job was not started because your account is locked due to a billing issue.”** The job has runner ID `0` and no executed steps. This is an account/billing blocker, not a failing test or repository workflow command, so it cannot be repaired by a source change. Re-run CI after the repository owner restores Actions billing. This checkout is not authenticated to GitHub and cannot re-run the workflow or create the PR.
+- Updated `worker/Dockerfile` to copy worker files with `COPY --chown=10001:10001`.
+- Expanded `scripts/validate_staging.sh` to build and inspect the worker image (without starting the scanner loop), run the staged E2E including administrator job cancellation, and execute SQLite `PRAGMA integrity_check` inside the staging web container. These Docker steps remain unverified locally because Docker Engine/Compose are absent.
+
 The local HTTP run used `SESSION_COOKIE_SECURE=false` only for loopback transport. The staging Compose profile sets the same staging-only value and binds its service to `127.0.0.1`; production cookie security is not changed.
+
+### Follow-up on main (2026-11-10; branch `fix/v2-ci-staging`)
+
+- Re-ran `.venv/bin/python -m pytest -q -rs`: **69 passed, 1 skipped, 3 warnings**. The skipped test is still the opt-in live RIPEstat integration. No tests were disabled.
+- Python compilation for application/SDK/CLI and JavaScript syntax checks passed. The updated worker source is also covered by the worker-image runtime ownership probe in `scripts/validate_staging.sh`; that image probe needs Docker.
+- Re-ran `scripts/staging_e2e.py` against a fresh loopback Uvicorn/SQLite instance after extending it to submit and cancel a separate authorized job: **passed**. The harness exercises worker enrollment, heartbeat/scheduling, claim/start/progress, out-of-scope result rejection, valid result ingestion, administrator cancellation, and public search/job separation. Its worker is a protocol fixture; no scanner module or target probe ran.
+- Local `PRAGMA integrity_check`: **ok** on the fresh E2E database. `sh -n scripts/validate_staging.sh` and `git diff --check`: passed.
+- `scripts/validate_staging.sh` was invoked and exited **2** with “Docker is required for container validation.” `docker` and `docker compose` are absent. Container builds, image ownership inspection, isolated Compose E2E, and in-container integrity checks remain unverified.
+- Investigated CI run [42882609443](https://github.com/404CoderFound/ihatepaywalls-shodan/actions/runs/42882609443) for commit `5732e5a019b76822d7aece4b2d5364e004da9777`. The GitHub check annotation states that the job **was not started because the account is locked due to a billing issue**; runner ID is 0 and the job has no executed steps. This is not a code/test failure and cannot be fixed in the repo. Re-enable billing and rerun Actions before treating CI as passing.
+- `worker/Dockerfile` now uses `COPY --chown=10001:10001`. The Docker staging validator builds and checks the worker image without starting its scanner loop. See `POSTGRES_MIGRATION_PLAN.md` for the separately scoped PostgreSQL design; no PostgreSQL implementation or migration has been performed.
 
 ## Docker tests still required
 
 Run the isolated staging procedure below on a Docker-capable Debian 13 host. A passing local Python E2E does not substitute for these checks. Preserve the output of `scripts/validate_staging.sh`, `docker compose ps`, and staging logs for the release record.
 
 - Compose config isolation, image build, container health, API checks, and the complete `scripts/staging_e2e.py` run.
+- Worker image build and assertion that all `/srv/worker` paths and the runtime process use UID 10001.
+- Administrator cancellation and SQLite `integrity_check` assertions added to the staging validator.
 - Repeat using the `scanner01` worker image/configuration if its deployment is separate from this repository; verify existing registration/token compatibility and worker result ingestion.
 - Validate upgrade and rollback from a copy of the intended v0.4 database. Never point staging at production data or production volumes.
 

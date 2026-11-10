@@ -188,6 +188,14 @@ def main():
     completed=api.expect("POST",f"/api/worker/jobs/{session_job['id']}/results",payload=good,headers=wh)
     assert completed["status"]=="completed" and completed["indexed"]==1
     assert api.expect("GET","/api/hosts/198.51.100.97")["services"]
+    # Verify administrator cancellation through the v1 control API while the
+    # enrolled worker remains available. The job is scoped to a TEST-NET host
+    # and cancellation happens before the worker claims it.
+    cancel_job=api.expect("POST","/api/admin/jobs",payload={"target":"198.51.100.96/32","profile_id":profile["id"],"ports":[9444]},headers=admin_h)
+    assert cancel_job["status"] in {"queued","assigned"}
+    assert api.expect("POST",f"/api/admin/jobs/{cancel_job['id']}/cancel",headers=admin_h)["status"]=="cancelled"
+    cancelled_rows=api.expect("GET","/api/admin/jobs",headers=admin_h)["jobs"]
+    assert next(row for row in cancelled_rows if row["id"]==cancel_job["id"])["status"]=="cancelled"
     scope_status,scope_result,_=api.call("GET","/api/admin/hosts/198.51.100.40/authorization",headers=admin_h)
     assert scope_status==200 and scope_result["authorized"]
     print("PASS release E2E: imports, public/passive search, ASN indexing, host history, CVE correlation, monitor events/outbox, map analytics, screenshot access, docs/API/CLI, CSRF sessions, worker queue/lease/result scope.")
