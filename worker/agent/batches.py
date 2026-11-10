@@ -86,7 +86,11 @@ class DurableSpool:
             raise ValueError("Saved spool exceeds scan job size")
         # A missing middle chunk must not silently cause a partial replay.
         for path in self.path.glob("chunk-*.json"):
-            if int(path.stem.split("-")[1]) >= self.next_index:
+            index = int(path.stem.split("-")[1])
+            if index < self.base_index:
+                # The manifest has already committed an acknowledged checkpoint.
+                path.unlink()
+            elif index >= self.next_index:
                 raise ValueError("Saved spool has a missing batch")
 
     def _chunk_path(self, index: int) -> Path:
@@ -119,6 +123,29 @@ class DurableSpool:
                 raise ValueError("Server acknowledged different scan progress")
         elif checks_done != self.base_checks:
             raise ValueError("Server checkpoint differs from spool baseline")
+
+    def acknowledge(self, batch_index: int, checks_done: int) -> None:
+        """Forget confirmed chunks to keep spool disk usage bounded."""
+        if batch_index < self.base_index:
+            return
+        if batch_index >= self.next_index:
+            raise ValueError("Acknowledging an unknown batch")
+        item = json.loads(self._chunk_path(batch_index).read_text())
+        if item["checks_done"] != checks_done:
+            raise ValueError("Acknowledged batch progress differs from spool")
+        new_base = batch_index + 1
+        state = {"identity": self.identity, "base_index": new_base,
+                 "base_checks": checks_done}
+        _atomic_json(self.path / "manifest.json", state)
+        for index in range(self.base_index, new_base):
+            path = self._chunk_path(index)
+            if path.exists():
+                path.unlink()
+        self.base_index = new_base
+        self.base_checks = checks_done
+        self.saved_bytes = (self.path / "manifest.json").stat().st_size + sum(
+            path.stat().st_size for path in self.path.glob("chunk-*.json")
+        )
 
     def append(self, checks_done: int, observations: list) -> dict:
         if not (self.next_checks < checks_done <= self.total_checks):
@@ -166,6 +193,7 @@ def run_batched_job(job, headers, call, scan, state_dir: Path):
             raise RuntimeError("Unexpected result batch acknowledgment")
         if result.get("batch_index") != data["batch_index"] or result.get("checks_done") != data["checks_done"]:
             raise RuntimeError("Result batch acknowledgment mismatch")
+        spool.acknowledge(data["batch_index"], data["checks_done"])
 
     # Server checkpoints allow a job to resume on a different worker too.
     remote = call(f"/api/worker/jobs/{job_id}/results/batches/status", None, headers)
