@@ -342,6 +342,28 @@ def init_db(seed_demo: bool = False) -> None:
             "source": "TEXT NOT NULL DEFAULT ''", "banner": "TEXT NOT NULL DEFAULT ''",
             "http_json": "TEXT NOT NULL DEFAULT '{}'", "tls_json": "TEXT NOT NULL DEFAULT '{}'"
         })
+
+        # v2 durable result batches are additive; legacy jobs/results remain valid.
+        db.executescript("""
+        CREATE TABLE IF NOT EXISTS scan_result_batches (
+          job_id TEXT NOT NULL REFERENCES scan_jobs(id),
+          batch_index INTEGER NOT NULL CHECK(batch_index >= 0),
+          payload_hash TEXT NOT NULL,
+          checks_done INTEGER NOT NULL CHECK(checks_done >= 1),
+          observation_count INTEGER NOT NULL CHECK(observation_count >= 0),
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(job_id, batch_index)
+        );
+        CREATE TABLE IF NOT EXISTS scan_result_finishes (
+          job_id TEXT PRIMARY KEY REFERENCES scan_jobs(id),
+          worker_id TEXT NOT NULL REFERENCES workers(id),
+          batch_count INTEGER NOT NULL,
+          completed_checks INTEGER NOT NULL,
+          observation_count INTEGER NOT NULL,
+          finished_at TEXT NOT NULL
+        );
+        """)
+
         _add_columns(db, "observations", {"observation_hash": "TEXT NOT NULL DEFAULT ''"})
         _add_columns(db, "observations", {"cpe": "TEXT NOT NULL DEFAULT ''", "os_name": "TEXT NOT NULL DEFAULT ''"})
         _add_columns(db, "services", {"cpe": "TEXT NOT NULL DEFAULT ''"})
