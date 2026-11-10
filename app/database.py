@@ -6,6 +6,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from .db_backend import configured_backend
 
 DB_PATH = Path(os.getenv("DATABASE_PATH", "/data/scanlattice.db"))
 
@@ -43,12 +44,15 @@ def upsert_host_identity(db: sqlite3.Connection, ip: str, source: str, observed_
 @contextmanager
 def connection():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(DB_PATH, timeout=20)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA foreign_keys=ON")
+    backend = configured_backend(os.getenv("DATABASE_BACKEND", "sqlite"))
+    db = backend.connect(DB_PATH)
+    backend.configure(db)
     try:
         yield db
         db.commit()
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 
@@ -66,6 +70,8 @@ def _add_columns(db: sqlite3.Connection, table: str, definitions: dict[str, str]
 
 def init_db(seed_demo: bool = False) -> None:
     with connection() as db:
+        if os.getenv("DATABASE_BACKEND", "sqlite").lower() != "sqlite":
+            raise RuntimeError("Schema migrations are SQLite-specific until a PostgreSQL migration is implemented")
         db.execute("PRAGMA journal_mode=WAL")
         db.executescript("""
         CREATE TABLE IF NOT EXISTS observations (
@@ -277,6 +283,43 @@ def init_db(seed_demo: bool = False) -> None:
           PRIMARY KEY(import_id,row_number),
           FOREIGN KEY(import_id) REFERENCES dataset_import_runs(id)
         );
+        CREATE TABLE IF NOT EXISTS scan_generations (
+          id TEXT PRIMARY KEY, refresh_request_id TEXT NOT NULL UNIQUE,
+          query TEXT NOT NULL, normalized_query TEXT NOT NULL,
+          query_kind TEXT NOT NULL, status TEXT NOT NULL,
+          requested_by TEXT NOT NULL, target_count INTEGER NOT NULL,
+          task_count INTEGER NOT NULL, completed_tasks INTEGER NOT NULL DEFAULT 0,
+          failed_tasks INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL, completed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_scan_generations_status ON scan_generations(status,created_at DESC);
+        CREATE TABLE IF NOT EXISTS scan_refresh_requests (
+          id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE,
+          request_fingerprint TEXT NOT NULL, query TEXT NOT NULL,
+          normalized_query TEXT NOT NULL, profile_id INTEGER NOT NULL,
+          ports_json TEXT NOT NULL, status TEXT NOT NULL,
+          requested_by TEXT NOT NULL, generation_id TEXT NOT NULL UNIQUE,
+          rejected_targets_json TEXT NOT NULL DEFAULT '[]',
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          FOREIGN KEY(generation_id) REFERENCES scan_generations(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_refresh_requests_created ON scan_refresh_requests(created_at DESC);
+        CREATE TABLE IF NOT EXISTS scan_tasks (
+          id TEXT PRIMARY KEY, generation_id TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL UNIQUE, target_ip TEXT NOT NULL,
+          ports_json TEXT NOT NULL, profile_id INTEGER NOT NULL,
+          scan_job_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL,
+          attempt_count INTEGER NOT NULL DEFAULT 0, max_attempts INTEGER NOT NULL DEFAULT 3,
+          lease_owner TEXT NOT NULL DEFAULT '', lease_token TEXT NOT NULL DEFAULT '',
+          lease_expires_at INTEGER, available_at INTEGER NOT NULL DEFAULT 0,
+          error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(generation_id) REFERENCES scan_generations(id),
+          FOREIGN KEY(profile_id) REFERENCES scan_profiles(id),
+          FOREIGN KEY(scan_job_id) REFERENCES scan_jobs(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_scan_tasks_generation ON scan_tasks(generation_id,status);
+        CREATE INDEX IF NOT EXISTS idx_scan_tasks_queue ON scan_tasks(status,available_at,created_at);
         """)
         _add_columns(db, "observations", {
             "hostname": "TEXT NOT NULL DEFAULT ''", "service": "TEXT NOT NULL DEFAULT ''",

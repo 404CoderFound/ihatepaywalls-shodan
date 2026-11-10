@@ -249,16 +249,18 @@ $("admin-login").addEventListener("click", async () => {
 async function loadAdmin() {
   try {
     const headers = adminHeaders();
-    const [workers,jobs,authorizations,profiles,stats,providers,imports] = await Promise.all([
+    const [workers,jobs,authorizations,profiles,stats,providers,imports,refreshRequests,scanTasks] = await Promise.all([
       api("/api/admin/workers",{headers}), api("/api/admin/jobs",{headers}),
       api("/api/admin/authorizations",{headers}), api("/api/admin/profiles",{headers}), api("/api/stats"),
-      api("/api/admin/passive/providers",{headers}),api("/api/admin/datasets/imports",{headers})
+      api("/api/admin/passive/providers",{headers}),api("/api/admin/datasets/imports",{headers}),
+      api("/api/admin/refresh-requests",{headers}),api("/api/admin/scan-tasks",{headers})
     ]);
     $("admin-content").classList.remove("hidden");
     $("workers-online").textContent = workers.workers.filter(row => row.online).length;
     $("indexed-hosts").textContent = stats.hosts;
     $("open-jobs").textContent = jobs.jobs.filter(row => ["queued","assigned","running"].includes(row.status)).length;
     $("job-profile").innerHTML = profiles.profiles.map(row => `<option value="${row.id}">${esc(row.name)} — ${row.ports.join(",")}</option>`).join("");
+    $("refresh-profile").innerHTML = profiles.profiles.map(row => `<option value="${row.id}">${esc(row.name)} — ${row.ports.join(",")}</option>`).join("");
     const selected = $("job-worker").value;
     $("job-worker").innerHTML = '<option value="">Automatic worker selection</option>' + workers.workers.map(row => `<option value="${row.id}">${esc(row.name)}${row.online ? "" : " (offline)"}</option>`).join("");
     $("job-worker").value = selected;
@@ -266,6 +268,9 @@ async function loadAdmin() {
     $("worker-table").innerHTML = workers.workers.map(row => `<tr><td>${esc(row.name)}<br><small>${row.id}</small></td><td class="${row.online ? "online" : "offline"}">${row.online ? "● Online" : "○ Offline"}</td><td>${row.cpu_pct.toFixed(1)}% / ${row.memory_pct.toFixed(1)}%</td><td>${row.running_jobs} / ${row.max_concurrent}</td><td>${row.completed_jobs}</td><td>${esc(row.version || "legacy")}<br><small>${esc(row.capabilities.join(", "))}</small></td><td>${new Date(row.last_seen*1000).toLocaleString()}</td></tr>`).join("") || '<tr><td colspan="7">No workers enrolled.</td></tr>';
     $("job-table").innerHTML = jobs.jobs.map(row => `<tr><td><small>${row.id}</small><br><b>${esc(row.target)}</b><br>${row.ports.join(", ")}</td><td>${esc(row.profile_name)}</td><td class="status-${row.status}">${esc(row.status.toUpperCase())}</td><td>${row.progress_done} / ${row.progress_total}</td><td>${esc(row.worker_name || "Unassigned")}</td><td>${esc(row.error || "")}${["queued","assigned","running"].includes(row.status) ? `<button class="tiny cancel-job" data-id="${row.id}">CANCEL</button>` : ""}</td></tr>`).join("") || '<tr><td colspan="6">No scan jobs.</td></tr>';
     document.querySelectorAll(".cancel-job").forEach(button => button.onclick = () => cancelJob(button.dataset.id));
+    $("refresh-table").innerHTML = refreshRequests.requests.map(row => `<tr><td><small>${esc(row.id)}</small><br><b>${esc(row.query)}</b><br><small>${esc(row.created_at)}</small></td><td class="status-${row.status}">${esc(row.status.toUpperCase())}</td><td>${row.generation.completed_tasks} / ${row.generation.task_count} completed · ${row.generation.failed_tasks} failed</td><td>${new Date(row.created_at).toLocaleString()}</td><td>${["queued","running"].includes(row.status)?`<button class="tiny cancel-generation" data-id="${esc(row.generation.generation_id)}">CANCEL</button>`:"—"}</td></tr>`).join("") || '<tr><td colspan="5">No refresh requests yet.</td></tr>';
+    document.querySelectorAll(".cancel-generation").forEach(button => button.onclick = async () => {try{await api(`/api/admin/scan-generations/${button.dataset.id}/cancel`,{method:"POST",headers:adminHeaders()});toast("Scan generation cancelled");await loadAdmin();}catch(error){toast(error.message);}});
+    $("scan-task-table").innerHTML = scanTasks.tasks.map(row => `<tr><td><small>${esc(row.id)}</small><br><small>${esc(row.generation_id)}</small></td><td><b>${esc(row.target_ip)}</b><br>${row.ports.join(", ")}</td><td class="status-${row.status}">${esc(row.status.toUpperCase())}</td><td>${row.attempt_count} / ${row.max_attempts}</td><td>${esc(row.worker_name||"Unassigned")}${row.error?`<br><small>${esc(row.error)}</small>`:""}</td></tr>`).join("") || '<tr><td colspan="5">No v2 generation tasks yet.</td></tr>';
     $("provider-table").innerHTML=providers.providers.map(row=>`<tr><td>${esc(row.name)}</td><td>${esc(row.provider_type)}</td><td>${row.enabled?"Enabled":"Disabled"}</td><td>${row.requests_per_minute}</td><td><button class="provider-toggle" data-id="${row.id}" data-enabled="${row.enabled}">${row.enabled?"DISABLE":"ENABLE"}</button></td></tr>`).join("")||'<tr><td colspan="5">No passive providers.</td></tr>';
     document.querySelectorAll(".provider-toggle").forEach(button=>button.onclick=async()=>{try{await api(`/api/admin/passive/providers/${button.dataset.id}`,{method:"PUT",headers:adminHeaders(),body:JSON.stringify({enabled:button.dataset.enabled!=="true",requests_per_minute:10})});await loadAdmin();}catch(error){toast(error.message);}});
     $("dataset-table").innerHTML=imports.imports.map(row=>`<tr><td>${esc(row.id)}<br>${esc(row.source)}</td><td>${esc(row.format)} / ${esc(row.encoding)}</td><td>${row.uploaded_bytes.toLocaleString()} / ${row.total_bytes.toLocaleString()}</td><td>${row.records_processed.toLocaleString()}</td><td>${esc(row.status)} ${esc(row.error||"")}</td><td>${esc(row.updated_at)}</td></tr>`).join("")||'<tr><td colspan="6">No dataset imports yet.</td></tr>';
@@ -300,6 +305,22 @@ $("auth-form").addEventListener("submit", async event => {
 $("job-form").addEventListener("submit", async event => {
   event.preventDefault(); const ports=$("job-ports").value.trim();
   try {await api("/api/admin/jobs",{method:"POST",headers:adminHeaders(),body:JSON.stringify({target:$("job-target").value,profile_id:Number($("job-profile").value),ports:ports?ports.split(",").map(Number):null,worker_id:$("job-worker").value||null})}); toast("Scan job submitted"); await loadAdmin();} catch(error){toast(error.message);}
+});
+$("refresh-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const query=$("refresh-query").value.trim(),profile_id=Number($("refresh-profile").value),rawPorts=$("refresh-ports").value.trim();
+  let ports=null;
+  try {
+    if(rawPorts){ports=rawPorts.split(",").map(value=>Number(value.trim()));if(ports.some(value=>!Number.isInteger(value)||value<1||value>65535))throw Error("Enter valid ports between 1 and 65535.");}
+    const fingerprint=JSON.stringify({query,profile_id,ports});let saved;
+    try{saved=JSON.parse(sessionStorage.getItem("scanlattice-refresh-request")||"null");}catch(_){saved=null;}
+    if(!saved||saved.fingerprint!==fingerprint)saved={fingerprint,key:crypto.randomUUID()};
+    sessionStorage.setItem("scanlattice-refresh-request",JSON.stringify(saved));
+    const result=await api("/api/admin/refresh-requests",{method:"POST",headers:{...adminHeaders(),"Idempotency-Key":saved.key},body:JSON.stringify({query,profile_id,ports})});
+    sessionStorage.removeItem("scanlattice-refresh-request");
+    $("refresh-status").textContent=`${result.status}: ${result.generation.task_count} bounded task(s); ${result.rejected_targets.length} indexed target(s) excluded because they are outside enabled authorizations.`;
+    await loadAdmin();
+  }catch(error){$("refresh-status").textContent=error.message;toast(error.message);}
 });
 async function cancelJob(id){try{await api(`/api/admin/jobs/${id}/cancel`,{method:"POST",headers:adminHeaders()});toast("Job cancelled");await loadAdmin();}catch(error){toast(error.message);}}
 

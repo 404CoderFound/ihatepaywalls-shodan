@@ -19,6 +19,10 @@ from .enrichment import enrichment_target, ensure_enrichment, queue_job, recover
 from .rate_limit import FixedWindowLimiter
 from .intelligence import MAX_IMPORT_BYTES, MAX_IMPORT_CHUNK, router as intelligence_router
 from .monitoring import create_event, start_scheduler as start_monitoring_scheduler
+from .index_scheduler import (
+    create_refresh_request, get_refresh_request, list_generations, list_refresh_requests,
+    list_tasks, sync_generation_states,
+)
 
 ROOT=Path(__file__).resolve().parent
 ADMIN_TOKEN=os.getenv("ADMIN_TOKEN",""); ENROLLMENT_TOKEN=os.getenv("ENROLLMENT_TOKEN","")
@@ -31,6 +35,9 @@ ENRICHMENT_ENABLED=os.getenv("PASSIVE_ENRICHMENT_ENABLED","true").lower()=="true
 MAX_ENRICHMENT_QUEUE=int(os.getenv("MAX_ENRICHMENT_QUEUE","100"))
 MAX_SCREENSHOT_BYTES=int(os.getenv("MAX_SCREENSHOT_BYTES",str(5*1024*1024)))
 MAX_CAMPAIGN_TARGETS=int(os.getenv("MAX_CAMPAIGN_TARGETS","65536"));MAX_BATCH_TARGETS=int(os.getenv("MAX_BATCH_TARGETS","256"))
+MAX_REFRESH_TARGETS=int(os.getenv("MAX_REFRESH_TARGETS","256"))
+MAX_REFRESH_CHECKS=int(os.getenv("MAX_REFRESH_CHECKS","25600"))
+V2_SCHEDULER_WORKER_SENTINEL="__scanlattice_v2_scheduler__"
 RATE_LIMITER=FixedWindowLimiter()
 app=FastAPI(title="ScanLattice API",version="1.0.0",docs_url=None,redoc_url=None)
 app.include_router(intelligence_router)
@@ -186,7 +193,7 @@ def docs():return {
     "endpoints":{
         "public_read":["GET /api/search","GET /api/hosts/{ip}","GET /api/hosts/{ip}/observations","GET /api/domains/{domain}","GET /api/stats","GET /api/enrichment/{id}","GET /api/analytics/summary","GET /api/reports/export.csv","GET /api/vulnerabilities","GET /api/vulnerabilities/stats","GET /api/vulnerabilities/{cve}"],
         "admin_session":["POST /api/admin/session","GET /api/admin/session","POST /api/admin/session/logout"],
-        "admin_control":["GET/POST /api/admin/authorizations","GET /api/admin/hosts/{ip}/authorization","POST /api/admin/hosts/{ip}/screenshots","GET /api/admin/screenshots","GET /api/admin/screenshots/{id}/content","GET/POST /api/admin/jobs","POST /api/admin/jobs/{id}/cancel","GET /api/admin/workers","POST /api/admin/passive/providers","PUT /api/admin/passive/providers/{id}","POST /api/admin/datasets/imports (Content-Range chunk upload)","POST /api/admin/datasets/imports/{id}/resume","POST /api/admin/vulnerabilities/refresh","GET /api/admin/vulnerabilities/providers","GET/POST /api/admin/monitor/targets","GET/POST /api/admin/monitor/destinations","POST /api/admin/monitor/run-once","GET /api/admin/monitor/events","GET /api/admin/monitor/notifications","POST /api/admin/monitor/notifications/{id}/retry","POST /api/admin/monitor/events/{id}/acknowledge","GET/POST /api/admin/api-keys","GET/POST /api/admin/saved-searches"],
+        "admin_control":["GET/POST /api/admin/authorizations","GET /api/admin/hosts/{ip}/authorization","POST /api/admin/hosts/{ip}/screenshots","GET /api/admin/screenshots","GET /api/admin/screenshots/{id}/content","GET/POST /api/admin/jobs","POST /api/admin/jobs/{id}/cancel","GET/POST /api/admin/refresh-requests","GET /api/admin/refresh-requests/{id}","GET /api/admin/scan-generations","GET /api/admin/scan-tasks","POST /api/admin/scan-generations/{id}/cancel","GET /api/admin/workers","POST /api/admin/passive/providers","PUT /api/admin/passive/providers/{id}","POST /api/admin/datasets/imports (Content-Range chunk upload)","POST /api/admin/datasets/imports/{id}/resume","POST /api/admin/vulnerabilities/refresh","GET /api/admin/vulnerabilities/providers","GET/POST /api/admin/monitor/targets","GET/POST /api/admin/monitor/destinations","POST /api/admin/monitor/run-once","GET /api/admin/monitor/events","GET /api/admin/monitor/notifications","POST /api/admin/monitor/notifications/{id}/retry","POST /api/admin/monitor/events/{id}/acknowledge","GET/POST /api/admin/api-keys","GET/POST /api/admin/saved-searches"],
         "worker":["POST /api/worker/register","POST /api/worker/heartbeat","GET /api/worker/jobs/next","POST /api/worker/jobs/{id}/results"]
     },
     "dataset_import":{"formats":["CSV","JSON array or object","JSONL"],"encoding":["identity","gzip"],"maximum_bytes":MAX_IMPORT_BYTES,"maximum_chunk_bytes":MAX_IMPORT_CHUNK,"resume":"Reuse the import id and continue at the returned byte offset; failed parsing can be retried with POST /api/admin/datasets/imports/{id}/resume"}
@@ -231,19 +238,29 @@ class Heartbeat(BaseModel):
 
 def schedule(db):
     now=int(time.time())
+    revoked=db.execute("SELECT j.id FROM scan_jobs j JOIN authorizations a ON a.id=j.authorization_id WHERE a.enabled=0 AND j.status IN ('queued','assigned','running')").fetchall()
+    for row in revoked:
+        db.execute("UPDATE scan_jobs SET status='cancelled',error='Target authorization revoked',lease_token=NULL,lease_expires_at=NULL,updated_at=?,completed_at=? WHERE id=?",(utc_now(),utc_now(),row["id"]))
     for j in db.execute("SELECT * FROM scan_jobs WHERE status IN ('assigned','running') AND lease_expires_at<?",(now,)).fetchall():
         status="failed" if j["attempts"]>=j["max_attempts"] else "queued"
         db.execute("UPDATE scan_jobs SET status=?,assigned_worker_id=NULL,lease_token=NULL,lease_expires_at=NULL,error='Worker lease expired',updated_at=? WHERE id=?",(status,utc_now(),j["id"]))
+        task=db.execute("SELECT id,attempt_count FROM scan_tasks WHERE scan_job_id=?",(j["id"],)).fetchone()
+        if task and status=="queued":
+            delay=min(300,5*(2**max(0,int(task["attempt_count"])-1)))
+            db.execute("UPDATE scan_tasks SET available_at=?,error='Worker lease expired',updated_at=? WHERE id=?",(now+delay,utc_now(),task["id"]))
     workers=[dict(r) for r in db.execute("SELECT * FROM workers WHERE last_seen>?",(now-OFFLINE,))]
     for j in db.execute("SELECT * FROM scan_jobs WHERE status='queued' ORDER BY created_at").fetchall():
+        task=db.execute("SELECT available_at FROM scan_tasks WHERE scan_job_id=?",(j["id"],)).fetchone()
+        if task and task["available_at"]>now:continue
         choices=[]
         for w in workers:
-            if "tcp-connect" not in json.loads(w["capabilities"]) or (j["requested_worker_id"] and j["requested_worker_id"]!=w["id"]):continue
+            if "tcp-connect" not in json.loads(w["capabilities"]) or (j["requested_worker_id"] and j["requested_worker_id"]!=V2_SCHEDULER_WORKER_SENTINEL and j["requested_worker_id"]!=w["id"]):continue
             running=db.execute("SELECT COUNT(*) FROM scan_jobs WHERE assigned_worker_id=? AND status IN ('assigned','running')",(w["id"],)).fetchone()[0]
             if running<w["max_concurrent"]:choices.append((running*40+w["cpu_pct"]*.4+w["memory_pct"]*.2,w))
         if choices:
             w=min(choices,key=lambda x:x[0])[1]
             db.execute("UPDATE scan_jobs SET status='assigned',assigned_worker_id=?,attempts=attempts+1,lease_token=?,lease_expires_at=?,updated_at=? WHERE id=? AND status='queued'",(w["id"],secrets.token_urlsafe(24),now+LEASE,utc_now(),j["id"]))
+    sync_generation_states(db)
 
 @app.post("/api/worker/heartbeat")
 def heartbeat(p:Heartbeat,x_worker_token:Annotated[str|None,Header()]=None):
@@ -258,7 +275,7 @@ def heartbeat(p:Heartbeat,x_worker_token:Annotated[str|None,Header()]=None):
 @app.post("/api/worker/jobs/claim")
 def claim(x_worker_token:Annotated[str|None,Header()]=None):
     with connection() as db:
-        w=worker(db,x_worker_token);schedule(db);rows=[dict(r) for r in db.execute("SELECT j.*,p.connect_timeout,p.banner_timeout,p.max_concurrency,p.rate_per_second,a.cidr authorization_cidr FROM scan_jobs j JOIN scan_profiles p ON p.id=j.profile_id JOIN authorizations a ON a.id=j.authorization_id WHERE j.assigned_worker_id=? AND j.status='assigned' ORDER BY j.created_at LIMIT ?",(w["id"],w["max_concurrent"]))]
+        w=worker(db,x_worker_token);schedule(db);rows=[dict(r) for r in db.execute("SELECT j.*,p.connect_timeout,p.banner_timeout,p.max_concurrency,p.rate_per_second,a.cidr authorization_cidr FROM scan_jobs j JOIN scan_profiles p ON p.id=j.profile_id JOIN authorizations a ON a.id=j.authorization_id AND a.enabled=1 WHERE j.assigned_worker_id=? AND j.status='assigned' ORDER BY j.created_at LIMIT ?",(w["id"],w["max_concurrent"]))]
     for r in rows:r["ports"]=json.loads(r["ports"])
     return {"jobs":rows}
 
@@ -276,11 +293,14 @@ def leased(db,jid,wid,token):
     return j
 @app.post("/api/worker/jobs/{jid}/start")
 def start(jid:str,p:LeaseAction,x_worker_token:Annotated[str|None,Header()]=None):
-    with connection() as db:w=worker(db,x_worker_token);leased(db,jid,w["id"],p.lease_token);db.execute("UPDATE scan_jobs SET status='running',started_at=COALESCE(started_at,?),updated_at=?,lease_expires_at=? WHERE id=?",(utc_now(),utc_now(),int(time.time())+LEASE,jid))
+    with connection() as db:
+        w=worker(db,x_worker_token);j=leased(db,jid,w["id"],p.lease_token)
+        if not db.execute("SELECT 1 FROM authorizations WHERE id=? AND enabled=1",(j["authorization_id"],)).fetchone():raise HTTPException(409,"Target authorization was revoked")
+        db.execute("UPDATE scan_jobs SET status='running',started_at=COALESCE(started_at,?),updated_at=?,lease_expires_at=? WHERE id=?",(utc_now(),utc_now(),int(time.time())+LEASE,jid));sync_generation_states(db)
     return {"status":"running"}
 @app.post("/api/worker/jobs/{jid}/progress")
 def progress(jid:str,p:LeaseAction,x_worker_token:Annotated[str|None,Header()]=None):
-    with connection() as db:w=worker(db,x_worker_token);j=leased(db,jid,w["id"],p.lease_token);db.execute("UPDATE scan_jobs SET progress_done=?,updated_at=?,lease_expires_at=? WHERE id=?",(min(p.progress_done or 0,j["progress_total"]),utc_now(),int(time.time())+LEASE,jid))
+    with connection() as db:w=worker(db,x_worker_token);j=leased(db,jid,w["id"],p.lease_token);db.execute("UPDATE scan_jobs SET progress_done=?,updated_at=?,lease_expires_at=? WHERE id=?",(min(p.progress_done or 0,j["progress_total"]),utc_now(),int(time.time())+LEASE,jid));sync_generation_states(db)
     return {"status":"ok"}
 
 class Observation(BaseModel):
@@ -402,12 +422,21 @@ def results(jid:str,p:Results,x_worker_token:Annotated[str|None,Header()]=None):
                 details={"port":service["port"],"protocol":service["proto"],"service":service["service"],"product":service["product"],"last_observed_at":service["last_seen"],"scan_job_id":jid}
                 for monitor in monitors:
                     if service["port"] in ports and ipaddress.ip_address(service["host_ip"]) in ipaddress.ip_network(monitor["target"],strict=False):create_event(db,monitor,service["host_ip"],"service_disappeared",details,"active-scan",utc_now())
-        db.execute("INSERT INTO result_uploads VALUES(?,?,?,?,?)",(p.idempotency_key,jid,w["id"],utc_now(),count));db.execute("UPDATE scan_jobs SET status='completed',progress_done=progress_total,completed_at=?,updated_at=?,lease_expires_at=NULL WHERE id=?",(utc_now(),utc_now(),jid));db.execute("UPDATE workers SET completed_jobs=completed_jobs+1 WHERE id=?",(w["id"],))
+        db.execute("INSERT INTO result_uploads VALUES(?,?,?,?,?)",(p.idempotency_key,jid,w["id"],utc_now(),count));db.execute("UPDATE scan_jobs SET status='completed',progress_done=progress_total,completed_at=?,updated_at=?,lease_expires_at=NULL,lease_token=NULL WHERE id=?",(utc_now(),utc_now(),jid));db.execute("UPDATE workers SET completed_jobs=completed_jobs+1 WHERE id=?",(w["id"],));sync_generation_states(db)
     return {"status":"completed","indexed":count}
 @app.post("/api/worker/jobs/{jid}/fail")
 def fail(jid:str,p:LeaseAction,x_worker_token:Annotated[str|None,Header()]=None):
-    with connection() as db:w=worker(db,x_worker_token);leased(db,jid,w["id"],p.lease_token);db.execute("UPDATE scan_jobs SET status='failed',error=?,completed_at=?,updated_at=?,lease_expires_at=NULL WHERE id=?",(p.error or "Worker reported failure",utc_now(),utc_now(),jid))
-    return {"status":"failed"}
+    with connection() as db:
+        w=worker(db,x_worker_token);j=leased(db,jid,w["id"],p.lease_token);task=db.execute("SELECT id,attempt_count FROM scan_tasks WHERE scan_job_id=?",(jid,)).fetchone();now=int(time.time());timestamp=utc_now()
+        if task and j["attempts"]<j["max_attempts"]:
+            delay=min(300,5*(2**max(0,int(j["attempts"])-1)))
+            db.execute("UPDATE scan_jobs SET status='queued',assigned_worker_id=NULL,error=?,updated_at=?,completed_at=NULL,lease_expires_at=NULL,lease_token=NULL WHERE id=?",(p.error or "Worker reported failure; retry scheduled",timestamp,jid))
+            db.execute("UPDATE scan_tasks SET available_at=?,error=?,updated_at=? WHERE id=?",(now+delay,p.error or "Worker reported failure; retry scheduled",timestamp,task["id"]))
+            status="queued"
+        else:
+            db.execute("UPDATE scan_jobs SET status='failed',error=?,completed_at=?,updated_at=?,lease_expires_at=NULL,lease_token=NULL WHERE id=?",(p.error or "Worker reported failure",timestamp,timestamp,jid));status="failed"
+        sync_generation_states(db)
+    return {"status":status}
 
 class ImportPayload(BaseModel):
     observations:list[Observation]=Field(min_length=1,max_length=1000);provenance:str=Field(default="administrator import",min_length=2,max_length=200)
@@ -614,7 +643,7 @@ def revoke_auth(auth_id:int,x_admin_token:Annotated[str|None,Header()]=None):
     admin(x_admin_token)
     with connection() as db:
         if db.execute("SELECT 1 FROM authorizations WHERE id=?",(auth_id,)).fetchone() is None:raise HTTPException(404,"Authorization not found")
-        db.execute("UPDATE authorizations SET enabled=0 WHERE id=?",(auth_id,));audit(db,"authorization.revoked",{"id":auth_id})
+        now=utc_now();db.execute("UPDATE authorizations SET enabled=0 WHERE id=?",(auth_id,));db.execute("UPDATE scan_jobs SET status='cancelled',error='Target authorization revoked',lease_token=NULL,lease_expires_at=NULL,updated_at=?,completed_at=? WHERE authorization_id=? AND status IN ('queued','assigned','running')",(now,now,auth_id));sync_generation_states(db);audit(db,"authorization.revoked",{"id":auth_id})
     return {"enabled":False}
 @app.get("/api/admin/profiles")
 def profiles(x_admin_token:Annotated[str|None,Header()]=None):
@@ -634,6 +663,58 @@ def create_profile(p:ProfileCreate,x_admin_token:Annotated[str|None,Header()]=No
     return {"id":cursor.lastrowid,"name":p.name,"ports":ports}
 
 class JobCreate(BaseModel):target:str;profile_id:int;ports:list[int]|None=None;worker_id:str|None=None
+
+class RefreshCreate(BaseModel):
+    query:str=Field(min_length=1,max_length=500)
+    profile_id:int
+    ports:list[int]|None=Field(default=None,max_length=MAX_PORTS)
+
+@app.post("/api/admin/refresh-requests",status_code=202)
+def create_refresh(p:RefreshCreate,x_admin_token:Annotated[str|None,Header()]=None,
+                   idempotency_key:Annotated[str|None,Header(alias="Idempotency-Key")]=None):
+    admin(x_admin_token)
+    with connection() as db:
+        request=create_refresh_request(db,query=p.query,profile_id=p.profile_id,requested_ports=p.ports,
+            idempotency_key=idempotency_key,requested_by="administrator",max_targets=MAX_REFRESH_TARGETS,max_ports=MAX_PORTS,max_checks=MAX_REFRESH_CHECKS)
+        schedule(db)
+        audit(db,"scan.refresh_requested",{"request_id":request["id"],"generation_id":request["generation"]["generation_id"],"query":p.query,"tasks":request["generation"]["task_count"]})
+        request=get_refresh_request(db,request["id"])
+    return request
+
+@app.get("/api/admin/refresh-requests")
+def refresh_requests(x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:schedule(db);return {"requests":list_refresh_requests(db)}
+
+@app.get("/api/admin/refresh-requests/{request_id}")
+def refresh_request_status(request_id:str,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:schedule(db);return get_refresh_request(db,request_id)
+
+@app.get("/api/admin/scan-generations")
+def scan_generations(x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:schedule(db);return {"generations":list_generations(db)}
+
+@app.get("/api/admin/scan-tasks")
+def scan_tasks(x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:schedule(db);return {"tasks":list_tasks(db)}
+
+@app.post("/api/admin/scan-generations/{generation_id}/cancel")
+def cancel_generation(generation_id:str,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:
+        generation=db.execute("SELECT id,status FROM scan_generations WHERE id=?",(generation_id,)).fetchone()
+        if not generation:raise HTTPException(404,"Scan generation not found")
+        if generation["status"] in {"completed","partial","failed","cancelled"}:raise HTTPException(409,"Generation is already terminal")
+        now=utc_now()
+        db.execute("UPDATE scan_jobs SET status='cancelled',updated_at=?,completed_at=?,lease_expires_at=NULL,lease_token=NULL WHERE id IN (SELECT scan_job_id FROM scan_tasks WHERE generation_id=?) AND status IN ('queued','assigned','running')",(now,now,generation_id))
+        sync_generation_states(db)
+        audit(db,"scan.generation_cancelled",{"generation_id":generation_id})
+        request=db.execute("SELECT id FROM scan_refresh_requests WHERE generation_id=?",(generation_id,)).fetchone()
+        result=get_refresh_request(db,request[0])
+    return result
 
 class DeepReconPreview(BaseModel):
     query:str=Field(min_length=1,max_length=500)

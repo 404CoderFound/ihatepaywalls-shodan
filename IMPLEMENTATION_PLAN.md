@@ -7,6 +7,8 @@
 5. Python SDK/CLI, endpoint documentation, provider controls, import UI, offline interactive country map and authorized private screenshot library: implemented; automated capture remains external to the application.
 6. Isolated staging Compose, CI checks and validation script: defined. Local Docker runtime and restore tests are blocked by Docker unavailability and the lack of an operator-provided database copy.
 
+7. v2 index scheduler milestone: implemented on `feature/v2-index-scheduler`. The DB connection seam still selects SQLite only; additive generations, refresh requests and scan tasks reuse v1 worker jobs; bounded indexed-host planning, idempotency, lease/retry synchronization, protected admin status APIs and the Administration panel are covered by tests. Full suite: 69 passed, 1 opt-in provider test skipped. See `V2_INDEX_SCHEDULER.md`.
+
 ## Release readiness checkpoint (2026-11-08)
 
 - Local integrated pytest suite: 59 passed, 1 skipped, 3 framework/client deprecation warnings.

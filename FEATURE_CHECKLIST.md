@@ -22,6 +22,17 @@ Status records what is implemented in this checkout, not parity with a commercia
 | Commercial host-intelligence coverage | Requires provider credentials/license and an approved redistributable dataset; not claimed |
 | Production deployment | Not authorized and not performed |
 
+## v2 index scheduler milestone
+
+| Feature | Status |
+|---|---|
+| Database backend seam | `DatabaseBackend`/`ConnectionProtocol` with SQLite implementation is active by default; other backend names fail explicitly. Existing `connection()` call sites and SQLite files are preserved. SQL/migrations are still SQLite-specific; PostgreSQL is not yet supported. |
+| Persistent generations/tasks | Additive `scan_generations`, `scan_refresh_requests`, and `scan_tasks` tables link each bounded v2 task to a legacy `scan_jobs` row. Request/task idempotency keys and state/status APIs are implemented. |
+| Bounded query planning | Admin refresh supports normalized IP, CIDR, ASN and optional port filters. CIDR/ASN select already-indexed hosts only; configured host and host/port caps apply; enabled authorizations filter tasks. Revocation cancels queued/running jobs, and claim/start recheck authorization. No prefix expansion or public-search refresh side effect. |
+| Worker leases/retries | Existing v1 claim/start/progress/results API remains the execution path. V2 task state mirrors the v1 job lease; lost workers and task failures retry with delay up to the existing job attempt limit. Existing v1 failure behavior is unchanged. |
+| Admin scheduler panel | Admin-only refresh submission, idempotency retry, request/generation counters, task state, generation cancellation and authorization status are available in the Administration view and protected API. |
+| V2 tests | Deduplication, public-search separation, session+CSRF submissions, ASN normalization, CIDR limits, authorization revocation, lease expiry/retry, failure retry, cancellation, backend seam, UI references, and existing v1 APIs are covered. |
+
 ## Verification evidence (2026-11-08)
 
 - `./.venv/bin/python -m pytest -q`: 59 passed, 1 skipped, 3 dependency/framework deprecation warnings.
@@ -31,3 +42,9 @@ Status records what is implemented in this checkout, not parity with a commercia
 - `scripts/validate_staging.sh` builds and validates an isolated Compose profile, binds only to loopback, uses a project-scoped volume, and retains that volume after container teardown.
 - Docker is unavailable locally; container tests have not been run. CI is configured to run the Compose validator on a Docker-capable runner, but no CI result is available in this audit.
 - See `RELEASE_READINESS.md` for incomplete features, provider dependencies, exact Debian 13 staging steps, rollback, and production gates.
+
+## v2 milestone verification (2026-11-10)
+
+- Full suite: 69 passed, 1 skipped, 3 framework/client warnings. The skipped test remains the opt-in live RIPEstat integration; no provider calls were made.
+- v2 scheduler regression tests cover the new DB tables and APIs while all v1 tests continue to pass.
+- PostgreSQL, Docker, and production database migration were not performed. See `V2_INDEX_SCHEDULER.md` for compatibility and rollback instructions.
