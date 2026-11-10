@@ -1,5 +1,5 @@
 -- Durable result batch receipts, applied after initial schema and SQLite-import ledger.
--- All writes run inside the controlplane transaction; batch index uniqueness
+-- All writes run inside the controlplane transaction. Batch index uniqueness
 -- provides exactly-once ingestion under reconnect/retry.
 CREATE TABLE IF NOT EXISTS scan_result_batches (
   job_id TEXT NOT NULL REFERENCES scan_jobs(id),
