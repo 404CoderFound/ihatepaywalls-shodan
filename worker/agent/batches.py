@@ -56,13 +56,18 @@ class DurableSpool:
                     "ports": sorted(set(int(p) for p in job["ports"]))}
         manifest = self.path / "manifest.json"
         if manifest.exists():
-            if json.loads(manifest.read_text()) != identity:
+            state = json.loads(manifest.read_text())
+            if state.get("identity") != identity:
                 raise ValueError("Saved spool does not match the assigned scan job")
         else:
-            _atomic_json(manifest, identity)
+            state = {"identity": identity, "base_index": 0, "base_checks": 0}
+            _atomic_json(manifest, state)
+        self.identity = identity
+        self.base_index = int(state["base_index"])
+        self.base_checks = int(state["base_checks"])
         self.total_checks = ipaddress.ip_network(identity["target"]).num_addresses * len(identity["ports"])
-        self.next_checks = 0
-        self.next_index = 0
+        self.next_checks = self.base_checks
+        self.next_index = self.base_index
         self.saved_bytes = manifest.stat().st_size
         while True:
             path = self._chunk_path(self.next_index)
@@ -87,9 +92,33 @@ class DurableSpool:
     def _chunk_path(self, index: int) -> Path:
         return self.path / f"chunk-{index:08d}.json"
 
-    def saved(self):
-        for index in range(self.next_index):
+    def saved(self, start_index: int | None = None):
+        for index in range(self.base_index if start_index is None else start_index, self.next_index):
             yield json.loads(self._chunk_path(index).read_text())
+
+    def reconcile(self, batch_count: int, checks_done: int) -> None:
+        """Trust the authenticated server for batches committed by other workers."""
+        if batch_count < self.base_index or checks_done < self.base_checks or checks_done > self.total_checks:
+            raise ValueError("Server checkpoint conflicts with local spool")
+        if batch_count > self.next_index:
+            # A reassigned job may have completed batches on another worker.
+            # Those observations already live in the database; never rescan them.
+            for path in self.path.glob("chunk-*.json"):
+                path.unlink()
+            state = {"identity": self.identity, "base_index": batch_count, "base_checks": checks_done}
+            _atomic_json(self.path / "manifest.json", state)
+            self.base_index = self.next_index = batch_count
+            self.base_checks = self.next_checks = checks_done
+            self.saved_bytes = (self.path / "manifest.json").stat().st_size
+        elif batch_count == self.next_index:
+            if checks_done != self.next_checks:
+                raise ValueError("Server checkpoint differs from local checkpoint")
+        elif batch_count > self.base_index:
+            previous = json.loads(self._chunk_path(batch_count - 1).read_text())
+            if previous["checks_done"] != checks_done:
+                raise ValueError("Server acknowledged different scan progress")
+        elif checks_done != self.base_checks:
+            raise ValueError("Server checkpoint differs from spool baseline")
 
     def append(self, checks_done: int, observations: list) -> dict:
         if not (self.next_checks < checks_done <= self.total_checks):
@@ -138,8 +167,13 @@ def run_batched_job(job, headers, call, scan, state_dir: Path):
         if result.get("batch_index") != data["batch_index"] or result.get("checks_done") != data["checks_done"]:
             raise RuntimeError("Result batch acknowledgment mismatch")
 
-    # Replaying acknowledged chunks is safe: the server compares payload hashes.
-    for saved in spool.saved():
+    # Server checkpoints allow a job to resume on a different worker too.
+    remote = call(f"/api/worker/jobs/{job_id}/results/batches/status", None, headers)
+    if remote.get("status") != "running":
+        raise RuntimeError("Server did not confirm active result batch mode")
+    spool.reconcile(int(remote["batch_count"]), int(remote["checks_done"]))
+    # Replaying locally-spooled chunks is safe: batch hashes are idempotent.
+    for saved in spool.saved(int(remote["batch_count"])):
         upload(saved)
 
     concurrency = min(max(int(job["max_concurrency"]), 1), 50)

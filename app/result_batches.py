@@ -44,7 +44,7 @@ def batch_digest(checks_done: int, observations: list) -> str:
 
 
 def accept_batch(db, job, worker_id: str, batch_index: int, checks_done: int,
-                 observations: list, store: Callable) -> dict:
+                 observations: list, store: Callable, lease_seconds: int = 90) -> dict:
     """Accept exactly-once batch delivery in one database transaction.
 
     A repeated delivery is acknowledged only if its canonical content matches.
@@ -105,7 +105,7 @@ def accept_batch(db, job, worker_id: str, batch_index: int, checks_done: int,
     )
     db.execute(
         "UPDATE scan_jobs SET progress_done=?,updated_at=?,lease_expires_at=? WHERE id=?",
-        (checks_done, utc_now(), int(time.time()) + 90, job["id"]),
+        (checks_done, utc_now(), int(time.time()) + lease_seconds, job["id"]),
     )
     return {"status": "accepted", "batch_index": batch_index,
             "indexed": indexed, "checks_done": checks_done}

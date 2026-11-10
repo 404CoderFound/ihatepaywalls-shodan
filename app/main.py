@@ -432,6 +432,23 @@ def _notify_missing_batch_services(db, job):
                              details, "active-scan", utc_now())
 
 
+
+@app.get("/api/worker/jobs/{jid}/results/batches/status")
+def result_batch_status(jid: str, x_worker_token: Annotated[str | None, Header()] = None):
+    with connection() as db:
+        w = worker(db, x_worker_token)
+        job = db.execute("SELECT * FROM scan_jobs WHERE id=? AND assigned_worker_id=?", (jid, w["id"])).fetchone()
+        if not job or job["status"] != "running" or (job["lease_expires_at"] or 0) < int(time.time()):
+            raise HTTPException(409, "Job lease is invalid or expired")
+        if not db.execute("SELECT 1 FROM authorizations WHERE id=? AND enabled=1",
+                          (job["authorization_id"],)).fetchone():
+            raise HTTPException(409, "Target authorization was revoked")
+        state = db.execute("SELECT COUNT(*) AS batch_count,COALESCE(MAX(checks_done),0) AS checks_done "
+                           "FROM scan_result_batches WHERE job_id=?", (jid,)).fetchone()
+    return {"status": "running", "batch_count": state["batch_count"],
+            "checks_done": state["checks_done"], "progress_total": job["progress_total"]}
+
+
 @app.post("/api/worker/jobs/{jid}/results/batches")
 def upload_result_batch(jid: str, p: BatchUpload, x_worker_token: Annotated[str | None, Header()] = None):
     with connection() as db:
@@ -439,7 +456,7 @@ def upload_result_batch(jid: str, p: BatchUpload, x_worker_token: Annotated[str 
         j = leased(db, jid, w["id"], p.lease_token)
         # Parse observations with the same validation rules as legacy v1.
         observations = [Observation.model_validate(item) for item in p.observations]
-        result = accept_batch(db, j, w["id"], p.batch_index, p.checks_done, observations, store)
+        result = accept_batch(db, j, w["id"], p.batch_index, p.checks_done, observations, store, LEASE)
         sync_generation_states(db)
     return result
 
@@ -491,7 +508,8 @@ def results(jid:str,p:Results,x_worker_token:Annotated[str|None,Header()]=None):
 def fail(jid:str,p:LeaseAction,x_worker_token:Annotated[str|None,Header()]=None):
     with connection() as db:
         w=worker(db,x_worker_token);j=leased(db,jid,w["id"],p.lease_token);task=db.execute("SELECT id,attempt_count FROM scan_tasks WHERE scan_job_id=?",(jid,)).fetchone();now=int(time.time());timestamp=utc_now()
-        if task and j["attempts"]<j["max_attempts"]:
+        batched=bool(db.execute("SELECT 1 FROM scan_result_batches WHERE job_id=?",(jid,)).fetchone())
+        if (task or batched) and j["attempts"]<j["max_attempts"]:
             delay=min(300,5*(2**max(0,int(j["attempts"])-1)))
             db.execute("UPDATE scan_jobs SET status='queued',assigned_worker_id=NULL,error=?,updated_at=?,completed_at=NULL,lease_expires_at=NULL,lease_token=NULL WHERE id=?",(p.error or "Worker reported failure; retry scheduled",timestamp,jid))
             db.execute("UPDATE scan_tasks SET available_at=?,error=?,updated_at=? WHERE id=?",(now+delay,p.error or "Worker reported failure; retry scheduled",timestamp,task["id"]))
