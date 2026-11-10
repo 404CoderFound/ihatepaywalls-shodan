@@ -16,8 +16,8 @@ from pydantic import BaseModel, Field
 
 from .database import utc_now
 
-MAX_BATCH_CHECKS = 128
-MAX_BATCH_OBSERVATIONS = 128
+MAX_BATCH_CHECKS = 64
+MAX_BATCH_OBSERVATIONS = 64
 
 
 class BatchUpload(BaseModel):

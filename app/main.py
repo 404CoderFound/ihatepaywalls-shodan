@@ -19,7 +19,7 @@ from .enrichment import enrichment_target, ensure_enrichment, queue_job, recover
 from .rate_limit import FixedWindowLimiter
 from .intelligence import MAX_IMPORT_BYTES, MAX_IMPORT_CHUNK, router as intelligence_router
 from .monitoring import create_event, start_scheduler as start_monitoring_scheduler
-from .result_batches import BatchUpload, BatchFinish, accept_batch, finish_batches
+from .result_batches import BatchFinish, accept_batch, finish_batches
 from .index_scheduler import (
     create_refresh_request, get_refresh_request, list_generations, list_refresh_requests,
     list_tasks, sync_generation_states,
@@ -306,6 +306,12 @@ def progress(jid:str,p:LeaseAction,x_worker_token:Annotated[str|None,Header()]=N
 
 class Observation(BaseModel):
     ip:str;port:int=Field(ge=1,le=65535);proto:str=Field(default="tcp",pattern="^(tcp|udp)$");hostname:str=Field(default="",max_length=253);asn:str=Field(default="",max_length=40);org:str=Field(default="",max_length=160);country:str=Field(default="",max_length=8);service:str=Field(default="",max_length=80);product:str=Field(default="",max_length=160);banner:str=Field(default="",max_length=8192);source:str=Field(default="manual",max_length=200);http:dict[str,Any]=Field(default_factory=dict);tls:dict[str,Any]=Field(default_factory=dict);ssh_id:str=Field(default="",max_length=500);latency_ms:float|None=Field(default=None,ge=0,le=120000);observed_at:str=Field(default="",max_length=64);cpe:str=Field(default="",max_length=500);os_name:str=Field(default="",max_length=160)
+class BatchUpload(BaseModel):
+    lease_token:str=Field(min_length=10,max_length=200)
+    batch_index:int=Field(ge=0,le=1000000)
+    checks_done:int=Field(ge=1)
+    observations:list[Observation]=Field(default_factory=list,max_length=64)
+
 class Results(BaseModel):
     lease_token:str;idempotency_key:str=Field(min_length=8,max_length=200);observations:list[Observation]=Field(default_factory=list,max_length=10000);completed_checks:int|None=Field(default=None,ge=0)
 
@@ -454,9 +460,8 @@ def upload_result_batch(jid: str, p: BatchUpload, x_worker_token: Annotated[str 
     with connection() as db:
         w = worker(db, x_worker_token)
         j = leased(db, jid, w["id"], p.lease_token)
-        # Parse observations with the same validation rules as legacy v1.
-        observations = [Observation.model_validate(item) for item in p.observations]
-        result = accept_batch(db, j, w["id"], p.batch_index, p.checks_done, observations, store, LEASE)
+        # Pydantic validates the same Observation schema as the v1 result route.
+        result = accept_batch(db, j, w["id"], p.batch_index, p.checks_done, p.observations, store, LEASE)
         sync_generation_states(db)
     return result
 

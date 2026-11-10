@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 
 MAX_SPOOL_BYTES = 128 * 1024 * 1024
-MAX_BATCH_CHECKS = 128
+MAX_BATCH_CHECKS = 64
 
 
 def _canonical(data) -> bytes:

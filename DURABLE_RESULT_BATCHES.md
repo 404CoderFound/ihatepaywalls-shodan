@@ -5,7 +5,7 @@ Status: draft feature branch. No deployment or database migration has occurred.
 ## What changed
 
 - Existing v1 workers still use \`POST /api/worker/jobs/{id}/results\`. Existing wire fields, leases, and credentials remain valid.
-- Updated workers (agent v0.6) use **batched result uploads** with a maximum of 128 endpoint checks and observations per batch.
+- Updated workers (agent v0.6) use **batched result uploads** with a maximum of 64 endpoint checks and observations per batch.
 - Workers spool each chunk to their persistent \`/data/batch-spool/<job UUID>\` volume **before** uploading. The spool uses atomic rename and file + directory fsync. Successful acknowledgements advance a durable checkpoint and free old chunks, keeping disk use bounded (128 MiB spool safety cap).
 - Open-ended futures lists and whole-job observation arrays have been replaced by a bounded scanner thread pool and a lazy endpoint iterator. A worker only retains one small chunk in memory.
 - The SQLite schema gains two additive tables (\`scan_result_batches\`, \`scan_result_finishes\`). Each accepted batch records a deterministic SHA-256 payload hash and monotonic cumulative check count in the same database transaction as observations.
@@ -16,7 +16,7 @@ Status: draft feature branch. No deployment or database migration has occurred.
 
 1. Claim/start via existing v1 routes.
 2. \`GET /api/worker/jobs/{id}/results/batches/status\` returns \`{status:"running", batch_count, checks_done, progress_total}\` with a valid current worker assignment and lease.
-3. \`POST /api/worker/jobs/{id}/results/batches\` takes \`{lease_token, batch_index, checks_done, observations}\`. \`checks_done\` is cumulative, never a per-batch delta. Batches must be sequential; each may advance at most 128 checks. Empty observations are allowed for scans with no open ports.
+3. \`POST /api/worker/jobs/{id}/results/batches\` takes \`{lease_token, batch_index, checks_done, observations}\`. \`checks_done\` is cumulative, never a per-batch delta. Batches must be sequential; each may advance at most 64 checks. Empty observations are allowed for scans with no open ports.
 4. \`POST /api/worker/jobs/{id}/results/complete\` takes \`{lease_token, batch_count, completed_checks}\` and seals the job once all checks are accounted for. Completion is idempotent.
 5. A job cannot mix the legacy single result endpoint and batched result mode. v1 workers remain compatible.
 
