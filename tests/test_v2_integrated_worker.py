@@ -30,8 +30,8 @@ def test_fingerprinted_results_are_indexed_with_durable_worker_batches(system, a
         return response.json()
 
     def fake_scan(ip, port, connect_timeout, banner_timeout):
-        banner = (b"SSH-2.0-OpenSSH_9.6\\r\\n" if port == 22
-                  else b"HTTP/1.1 200 OK\\r\\nServer: LocalFixture\\r\\n\\r\\n")
+        banner = (b"SSH-2.0-OpenSSH_9.6\r\n" if port == 22
+                  else b"HTTP/1.1 200 OK\r\nServer: LocalFixture\r\n\r\n")
         fingerprint = fingerprint_banner(port, banner)
         return {"ip": ip, "port": port, "proto": "tcp",
                 "service": fingerprint.service, "product": fingerprint.product,
