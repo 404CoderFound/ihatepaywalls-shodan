@@ -62,3 +62,34 @@ def test_postgresql_executemany_keeps_cursor_when_psycopg_returns_none():
         ("Web services", "80,443"),
         ("Conservative", "22,80,443"),
     ]
+
+
+def test_service_backfill_uses_latest_observation_consistently(system):
+    """Portable SQL: selected service/product must belong to max observation id."""
+    _, _, database = system
+    with database.connection() as db:
+        db.execute(
+            "INSERT INTO observations(ip,port,proto,service,product,seen_at) VALUES(?,?,?,?,?,?)",
+            ("192.0.2.129", 9443, "tcp", "http", "OldProduct", "2026-01-01T00:00:00Z"),
+        )
+        db.execute(
+            "INSERT INTO observations(ip,port,proto,service,product,seen_at) VALUES(?,?,?,?,?,?)",
+            ("192.0.2.129", 9443, "tcp", "https", "NewProduct", "2026-01-02T00:00:00Z"),
+        )
+    # init_db performs the same historical backfill in SQLite and PostgreSQL.
+    database.init_db(False)
+    with database.connection() as db:
+        row = db.execute(
+            "SELECT service,product,first_seen,last_seen,last_observation_id "
+            "FROM services WHERE host_ip=? AND port=? AND proto=?",
+            ("192.0.2.129", 9443, "tcp"),
+        ).fetchone()
+        newest = db.execute(
+            "SELECT id FROM observations WHERE ip=? AND port=? ORDER BY id DESC LIMIT 1",
+            ("192.0.2.129", 9443),
+        ).fetchone()[0]
+    assert row is not None
+    assert (row["service"], row["product"]) == ("https", "NewProduct")
+    assert row["first_seen"] == "2026-01-01T00:00:00Z"
+    assert row["last_seen"] == "2026-01-02T00:00:00Z"
+    assert row["last_observation_id"] == newest
