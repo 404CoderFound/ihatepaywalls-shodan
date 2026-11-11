@@ -539,7 +539,9 @@ def analytics_summary(request: Request):
         countries = [dict(r) for r in db.execute("SELECT country,COUNT(*) hosts FROM hosts WHERE country!='' GROUP BY country ORDER BY hosts DESC LIMIT 50")]
         ports = [dict(r) for r in db.execute("SELECT port,COUNT(DISTINCT host_ip) hosts FROM services GROUP BY port ORDER BY hosts DESC LIMIT 50")]
         products = [dict(r) for r in db.execute("SELECT product,COUNT(DISTINCT host_ip) hosts FROM services WHERE product!='' GROUP BY product ORDER BY hosts DESC LIMIT 50")]
-        days = [dict(r) for r in db.execute("SELECT substr(seen_at,1,10) day,COUNT(*) observations,COUNT(DISTINCT ip) hosts FROM observations GROUP BY day ORDER BY day DESC LIMIT 180")]
+        # Explicitly quote the date alias: PostgreSQL parses bare DAY as a keyword.
+        # Group by the expression for identical behavior with SQLite.
+        days = [dict(r) for r in db.execute('SELECT substr(seen_at,1,10) AS "day",COUNT(*) AS observations,COUNT(DISTINCT ip) AS hosts FROM observations GROUP BY substr(seen_at,1,10) ORDER BY "day" DESC LIMIT 180')]
         totals = {"hosts": db.execute("SELECT COUNT(*) FROM hosts").fetchone()[0], "observations": db.execute("SELECT COUNT(*) FROM observations").fetchone()[0], "services": db.execute("SELECT COUNT(*) FROM services").fetchone()[0]}
     return {"totals": totals, "countries": countries, "ports": ports, "products": products, "daily": list(reversed(days)), "source": "indexed database observations"}
 
@@ -550,6 +552,11 @@ def export_csv():
     writer.writerow(["ip", "port", "protocol", "service", "product", "source", "observed_at"])
     with connection() as db:
         rows = db.execute("SELECT ip,port,proto,service,product,source,seen_at FROM observations ORDER BY seen_at DESC LIMIT 100000")
-        writer.writerows(rows)
+        # sqlite3.Row iterates over values, while PostgreSQLRow (Mapping)
+        # iterates over column names. Select values explicitly in CSV order.
+        writer.writerows(
+            (row["ip"], row["port"], row["proto"], row["service"], row["product"], row["source"], row["seen_at"])
+            for row in rows
+        )
     buffer.seek(0)
     return StreamingResponse(iter([buffer.getvalue()]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=scanlattice-observations.csv"})

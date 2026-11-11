@@ -518,7 +518,8 @@ def fail(jid:str,p:LeaseAction,x_worker_token:Annotated[str|None,Header()]=None)
         if (task or batched) and j["attempts"]<j["max_attempts"]:
             delay=min(300,5*(2**max(0,int(j["attempts"])-1)))
             db.execute("UPDATE scan_jobs SET status='queued',assigned_worker_id=NULL,error=?,updated_at=?,completed_at=NULL,lease_expires_at=NULL,lease_token=NULL WHERE id=?",(p.error or "Worker reported failure; retry scheduled",timestamp,jid))
-            db.execute("UPDATE scan_tasks SET available_at=?,error=?,updated_at=? WHERE id=?",(now+delay,p.error or "Worker reported failure; retry scheduled",timestamp,task["id"]))
+            if task:
+                db.execute("UPDATE scan_tasks SET available_at=?,error=?,updated_at=? WHERE id=?",(now+delay,p.error or "Worker reported failure; retry scheduled",timestamp,task["id"]))
             status="queued"
         else:
             db.execute("UPDATE scan_jobs SET status='failed',error=?,completed_at=?,updated_at=?,lease_expires_at=NULL,lease_token=NULL WHERE id=?",(p.error or "Worker reported failure",timestamp,timestamp,jid));status="failed"

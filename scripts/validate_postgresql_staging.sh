@@ -31,8 +31,8 @@ if docker volume inspect "$volume_name" >/dev/null 2>&1; then echo "Staging volu
 compose config --format json | python3 -c 'import json,sys; c=json.load(sys.stdin); assert set(c["services"])=={"postgres","web-staging"}; db=c["services"]["postgres"]; web=c["services"]["web-staging"]; assert not db.get("ports"); assert all(p.get("host_ip")=="127.0.0.1" for p in web["ports"]); assert web["environment"]["DATABASE_BACKEND"]=="postgresql"; assert all(v.get("source") not in {"web_scanlattice_data","worker_worker_state"} for s in c["services"].values() for v in s.get("volumes",[])); assert all(not v.get("external",False) for v in c.get("volumes",{}).values()); print("PostgreSQL staging isolation passed: private database network, loopback web port, project-scoped volume, no production volumes.")'
 cleanup() {
   if [ "${KEEP_STAGING:-false}" != "true" ]; then
-    compose down >/dev/null 2>&1 || true
-    printf 'PostgreSQL staging containers stopped; isolated volume retained: %s_postgres_staging_data\n' "$PROJECT"
+    compose down --volumes >/dev/null 2>&1 || true
+    printf 'PostgreSQL staging containers and temporary project-scoped volume removed: %s_postgres_staging_data\n' "$PROJECT"
   else
     printf 'PostgreSQL staging left running under project %s on 127.0.0.1:%s\n' "$PROJECT" "$PORT"
   fi

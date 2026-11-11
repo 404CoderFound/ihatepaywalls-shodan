@@ -195,7 +195,7 @@ export STAGING_POSTGRES_PASSWORD="$(openssl rand -hex 32)"
 scripts/validate_postgresql_staging.sh
 ```
 
-The validator builds the PostgreSQL-backed web image, checks the API and schema migration, then runs the reserved-address staging E2E. It stops containers and preserves the project-scoped staging volume unless explicitly cleaned up. Never reuse a production project or volume name.
+The validator builds the PostgreSQL-backed web image, checks the API and schema migration, then runs the reserved-address staging E2E. By default it removes its project-scoped containers and volume on exit; set `KEEP_STAGING=true` to leave the isolated staging environment running for manual review. Never reuse a production project or volume name.
 
 To rehearse an existing SQLite migration, first make an authorized sanitized copy and point `DATABASE_URL` at a **new, disposable staging database**. The importer takes a consistent SQLite backup, streams batches, commits rowid cursors with each batch, and resumes using the source fingerprint. It refuses a non-empty target and requires the staging confirmation flag:
 

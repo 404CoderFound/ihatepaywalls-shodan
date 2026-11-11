@@ -119,25 +119,19 @@ STAGING_ENROLLMENT_TOKEN="$(openssl rand -hex 32)" \
 scripts/validate_staging.sh
 ```
 
-The validator stops the staging container/network on exit and retains the project-scoped named data volume for inspection. To keep its container running for manual review, set `KEEP_STAGING=true`; clean it up with the same Compose project and staging file. It refuses an occupied loopback port, an existing project container, or an existing same-name staging volume. Do not reuse any production project/volume name.
+By default, the validator removes the staging container, network, and project-scoped named data volume on exit. To keep the staging environment running for manual review, set `KEEP_STAGING=true`; clean it up afterward with the same Compose project and staging file, using `down --volumes` when discarding its data. It refuses an occupied loopback port, an existing project container, or an existing same-name staging volume. Do not reuse any production project/volume name.
 
 ## Rollback procedure
 
-1. Stop only the named staging project, preserving its volume:
+1. Stop only the named staging project. Add `--volumes` to discard the temporary staging data:
 
    ```sh
    docker compose --env-file /dev/null -p "$STAGING_PROJECT" \
-     -f compose.staging.yaml down
+     -f compose.staging.yaml down --volumes
    ```
 
-2. To discard staging test data, first inspect the exact volume and confirm its Compose project label is the staging project, then remove only that volume:
-
-   ```sh
-   docker volume inspect "${STAGING_PROJECT}_scanlattice_staging_data"
-   docker volume rm "${STAGING_PROJECT}_scanlattice_staging_data"
-   ```
-
-3. To roll back a staging code upgrade, deploy the prior known-good release commit/image using a new staging project name. Keep the failed staging volume for diagnosis until its data is explicitly no longer needed.
+2. To preserve staging test data for diagnosis, stop the named project without `--volumes`; inspect the exact volume and its Compose project label before later removing it.
+3. To roll back a staging code upgrade, deploy the prior known-good release commit/image using a new staging project name. Keep a failed staging volume only while diagnosis needs its data.
 4. For a future production migration rollback, stop production writes, restore the verified pre-migration database backup to a new path/volume, verify it with SQLite integrity checks and an application smoke test, then switch back only under an approved production change. **This procedure has not been rehearsed on production data and is not authorization to access production.** Do not attempt a down-migration or overwrite the only backup.
 
 ## Production deployment prerequisites
