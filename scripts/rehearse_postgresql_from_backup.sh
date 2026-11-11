@@ -189,6 +189,9 @@ PY
 echo "Testing the actual v2 API against the migrated PostgreSQL COPY"
 runner python /repo/scripts/validate_migrated_postgresql_app.py
 
+echo "Testing fake, non-scanning worker API contract on migrated PostgreSQL"
+runner python /repo/scripts/validate_migrated_postgresql_worker_protocol.py
+
 echo "Testing REST API against a separate disposable SQLite rollback COPY"
 runner python - <<'PY'
 import hashlib
