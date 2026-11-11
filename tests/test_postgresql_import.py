@@ -64,8 +64,12 @@ def test_rehearsal_host_identity_reads_values_from_both_row_types():
         )
         columns = ("ip", "asn", "org")
         assert tuple(sqlite_row) != tuple(postgres_row)
-        assert tuple(sqlite_row[column] for column in columns) == tuple(
-            postgres_row[column] for column in columns
-        )
+        assert tuple(sqlite_row) == tuple(postgres_row[column] for column in columns)
+        # The rehearsal opens SQLite without a row_factory. Its rows are
+        # tuples, which support integer (not string) indexing.
+        source.row_factory = None
+        sqlite_tuple = source.execute("SELECT ip,asn,org FROM hosts").fetchone()
+        assert type(sqlite_tuple) is tuple
+        assert tuple(sqlite_tuple) == tuple(postgres_row[column] for column in columns)
     finally:
         source.close()

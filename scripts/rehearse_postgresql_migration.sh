@@ -117,10 +117,11 @@ try:
     a = source.execute("SELECT ip,asn,org FROM hosts WHERE ip=?", (fixture_ip,)).fetchone()
     b = pg.execute("SELECT ip,asn,org FROM hosts WHERE ip=?", (fixture_ip,)).fetchone()
     assert a is not None and b is not None, "Fixture host missing after import"
-    # SQLite row iteration yields values; PostgreSQLRow is a Mapping and
-    # iteration yields column names. Compare the selected field values.
+    # sqlite3.connect() uses tuple rows unless row_factory is configured;
+    # PostgreSQLRow is a Mapping whose iteration yields column names.
+    # SELECT fixes the source column order, so the SQLite tuple holds values.
     columns = ("ip", "asn", "org")
-    source_values = tuple(a[column] for column in columns)
+    source_values = tuple(a)
     target_values = tuple(b[column] for column in columns)
     assert source_values == target_values, (
         f"Fixture host identity mismatch: SQLite={source_values!r}, PostgreSQL={target_values!r}"
