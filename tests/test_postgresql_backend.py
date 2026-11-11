@@ -57,7 +57,8 @@ def test_postgresql_executemany_keeps_cursor_when_psycopg_returns_none():
         [("Web services", "80,443"), ("Conservative", "22,80,443")],
     )
     assert result.rowcount == 2
-    assert raw.last_cursor.statement == "INSERT INTO scan_profiles(name,ports) VALUES(%s,%s)"
+    # scan_profiles has a generated primary key: the adapter adds RETURNING id.
+    assert raw.last_cursor.statement == "INSERT INTO scan_profiles(name,ports) VALUES(%s,%s) RETURNING id"
     assert raw.last_cursor.params == [
         ("Web services", "80,443"),
         ("Conservative", "22,80,443"),
