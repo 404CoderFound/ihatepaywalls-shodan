@@ -552,6 +552,11 @@ def export_csv():
     writer.writerow(["ip", "port", "protocol", "service", "product", "source", "observed_at"])
     with connection() as db:
         rows = db.execute("SELECT ip,port,proto,service,product,source,seen_at FROM observations ORDER BY seen_at DESC LIMIT 100000")
-        writer.writerows(rows)
+        # sqlite3.Row iterates over values, while PostgreSQLRow (Mapping)
+        # iterates over column names. Select values explicitly in CSV order.
+        writer.writerows(
+            (row["ip"], row["port"], row["proto"], row["service"], row["product"], row["source"], row["seen_at"])
+            for row in rows
+        )
     buffer.seek(0)
     return StreamingResponse(iter([buffer.getvalue()]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=scanlattice-observations.csv"})
