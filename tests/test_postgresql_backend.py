@@ -93,3 +93,34 @@ def test_service_backfill_uses_latest_observation_consistently(system):
     assert row["first_seen"] == "2026-01-01T00:00:00Z"
     assert row["last_seen"] == "2026-01-02T00:00:00Z"
     assert row["last_observation_id"] == newest
+
+
+def test_routing_prefix_backfill_uses_latest_organization_and_aggregates_times(system):
+    """Works with strict PostgreSQL GROUP BY and existing SQLite records."""
+    _, _, database = system
+    with database.connection() as db:
+        db.executemany(
+            "INSERT INTO passive_records(subject,subject_type,network,asn,org,record_type,"
+            "value_json,source,observed_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            [
+                ("AS64512", "asn", "198.51.100.0/24", "AS64512", "Earlier Org",
+                 "announced-prefix", '{"version":1}', "fixture-backfill",
+                 "2026-01-01T00:00:00Z", 300),
+                ("AS64512", "asn", "198.51.100.0/24", "as64512", "Latest Org",
+                 "announced-prefix", '{"version":2}', "fixture-backfill",
+                 "2026-01-02T00:00:00Z", 200),
+            ],
+        )
+    database.init_db(False)
+    with database.connection() as db:
+        rows = db.execute(
+            "SELECT prefix,asn,organization,source,first_seen,last_seen,expires_at "
+            "FROM routing_prefixes WHERE prefix=? AND source=?",
+            ("198.51.100.0/24", "fixture-backfill"),
+        ).fetchall()
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["asn"], row["organization"]) == ("AS64512", "Latest Org")
+    assert row["first_seen"] == "2026-01-01T00:00:00Z"
+    assert row["last_seen"] == "2026-01-02T00:00:00Z"
+    assert row["expires_at"] == 300

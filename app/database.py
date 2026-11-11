@@ -464,9 +464,20 @@ def init_db(seed_demo: bool = False) -> None:
           WHERE banner=''""")
         db.execute("""INSERT OR IGNORE INTO hostnames(ip,hostname,source,first_seen,last_seen)
           SELECT ip,LOWER(hostname),source,MIN(seen_at),MAX(seen_at) FROM observations WHERE hostname!='' GROUP BY ip,LOWER(hostname),source""")
+        # GROUP BY cannot select an arbitrary organization in PostgreSQL.
+        # Aggregate the timestamps first, then read the organization from
+        # the newest source record so both databases return consistent data.
         db.execute("""INSERT OR IGNORE INTO routing_prefixes(prefix,asn,organization,source,first_seen,last_seen,expires_at)
-          SELECT network,UPPER(asn),org,source,MIN(observed_at),MAX(observed_at),MAX(expires_at)
-          FROM passive_records WHERE network!='' AND asn!='' GROUP BY network,UPPER(asn),source""")
+          SELECT grouped.network,grouped.normalized_asn,latest.org,grouped.source,
+                 grouped.first_seen,grouped.last_seen,grouped.expires_at
+          FROM (
+            SELECT network,UPPER(asn) AS normalized_asn,source,
+                   MIN(observed_at) AS first_seen,MAX(observed_at) AS last_seen,
+                   MAX(expires_at) AS expires_at,MAX(id) AS latest_record_id
+            FROM passive_records WHERE network!='' AND asn!=''
+            GROUP BY network,UPPER(asn),source
+          ) grouped
+          JOIN passive_records latest ON latest.id=grouped.latest_record_id""")
         import ipaddress
         mappings=[]
         for row in db.execute("SELECT prefix,asn,organization FROM routing_prefixes").fetchall():
