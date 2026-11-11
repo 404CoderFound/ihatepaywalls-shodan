@@ -33,8 +33,8 @@ compose config --format json | python3 -c 'import json,sys; c=json.load(sys.stdi
 cleanup() {
   docker image rm "$WORKER_IMAGE" >/dev/null 2>&1 || true
   if [ "${KEEP_STAGING:-false}" != "true" ]; then
-    compose down >/dev/null 2>&1 || true
-    printf 'Staging containers stopped; project-scoped data volume retained: %s_scanlattice_staging_data\n' "$PROJECT"
+    compose down --volumes >/dev/null 2>&1 || true
+    printf 'Staging containers and temporary project-scoped data volume removed: %s_scanlattice_staging_data\n' "$PROJECT"
   else
     printf 'Staging left running under project %s on 127.0.0.1:%s\n' "$PROJECT" "$PORT"
   fi

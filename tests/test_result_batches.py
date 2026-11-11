@@ -110,6 +110,10 @@ def test_batched_v1_failure_requeues_and_checkpoint_survives(system, admin_heade
     client, _, database = system
     job, wh = _running_job(system, admin_headers)
     assert _post(client, job, wh, 0, 1, []).status_code == 200
+    # Legacy v1 jobs can use batched result uploads without a v2 scan_tasks row.
+    with database.connection() as db:
+        assert db.execute("SELECT 1 FROM scan_tasks WHERE scan_job_id=?", (job["id"],)).fetchone() is None
+        assert db.execute("SELECT 1 FROM scan_result_batches WHERE job_id=?", (job["id"],)).fetchone()
     failed = client.post(f"/api/worker/jobs/{job['id']}/fail", headers=wh,
                          json={"lease_token": job["lease_token"], "error": "connection lost"})
     assert failed.status_code == 200 and failed.json()["status"] == "queued"
