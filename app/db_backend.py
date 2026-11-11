@@ -199,7 +199,9 @@ class PostgreSQLConnection:
 
     def executemany(self, sql: str, parameters: Any) -> PostgreSQLCursor:
         compiled = _postgres_sql(sql)
-        return PostgreSQLCursor(self._raw.cursor().executemany(compiled, parameters))
+        cursor = self._raw.cursor()
+        cursor.executemany(compiled, parameters)
+        return PostgreSQLCursor(cursor)
 
     def executescript(self, sql: str) -> None:
         for statement in sql.split(";"):
