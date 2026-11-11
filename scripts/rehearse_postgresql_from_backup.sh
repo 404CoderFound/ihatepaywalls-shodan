@@ -95,6 +95,8 @@ runner() {
     --env PASSIVE_ENRICHMENT_ENABLED=false \
     --env MONITORING_AUTO_CHECKS=false \
     --env VULNERABILITY_AUTO_REFRESH=false \
+    --env "ADMIN_TOKEN=$STAGING_ADMIN_TOKEN" \
+    --env "ENROLLMENT_TOKEN=$STAGING_ENROLLMENT_TOKEN" \
     --env SEED_DEMO=false \
     "$WEB_IMAGE" "$@"
 }
@@ -183,6 +185,9 @@ finally:
     target.close()
     source.close()
 PY
+
+echo "Testing the actual v2 API against the migrated PostgreSQL COPY"
+runner python /repo/scripts/validate_migrated_postgresql_app.py
 
 echo "Testing REST API against a separate disposable SQLite rollback COPY"
 runner python - <<'PY'
