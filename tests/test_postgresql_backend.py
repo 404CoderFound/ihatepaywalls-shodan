@@ -27,3 +27,38 @@ def test_postgresql_row_keeps_sqlite_row_access_patterns():
     row = PostgreSQLRow(("id", "name"), (7, "fixture"))
     assert row[0] == 7 and row["name"] == "fixture"
     assert dict(row) == {"id": 7, "name": "fixture"}
+
+
+def test_postgresql_executemany_keeps_cursor_when_psycopg_returns_none():
+    """psycopg3 Cursor.executemany() returns None; the cursor itself is usable."""
+    from app.db_backend import PostgreSQLConnection
+
+    class FakePsycopgCursor:
+        description = None
+        rowcount = 0
+
+        def executemany(self, statement, params):
+            self.statement = statement
+            self.params = list(params)
+            self.rowcount = len(self.params)
+            return None  # Matches the psycopg 3 API.
+
+    class FakePsycopgConnection:
+        def __init__(self):
+            self.last_cursor = FakePsycopgCursor()
+
+        def cursor(self):
+            return self.last_cursor
+
+    raw = FakePsycopgConnection()
+    db = PostgreSQLConnection(raw)
+    result = db.executemany(
+        "INSERT INTO scan_profiles(name,ports) VALUES(?,?)",
+        [("Web services", "80,443"), ("Conservative", "22,80,443")],
+    )
+    assert result.rowcount == 2
+    assert raw.last_cursor.statement == "INSERT INTO scan_profiles(name,ports) VALUES(%s,%s)"
+    assert raw.last_cursor.params == [
+        ("Web services", "80,443"),
+        ("Conservative", "22,80,443"),
+    ]
