@@ -68,6 +68,10 @@ def target_columns(db, table: str) -> set[str]:
     )}
 
 
+def target_has_table(db, table: str) -> bool:
+    """Check table existence from its column metadata, not its table name."""
+    return bool(target_columns(db, table))
+
 def copy_snapshot(source: sqlite3.Connection, snapshot_path: Path) -> None:
     snapshot = sqlite3.connect(snapshot_path)
     try:
@@ -104,7 +108,10 @@ def migrate(snapshot_path: Path, batch_size: int, schema: str,
         if not run:
             occupied = []
             for table in source_tables(source):
-                if table not in target_columns(target, table):
+                # target_columns() returns COLUMN names, not table names.
+                # A non-empty result means the source table exists in the
+                # currently selected, disposable PostgreSQL schema.
+                if not target_has_table(target, table):
                     raise RuntimeError(f"Target migration is missing source table {table!r}")
                 if table not in {"scan_profiles", "passive_providers"}:
                     count = target.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]

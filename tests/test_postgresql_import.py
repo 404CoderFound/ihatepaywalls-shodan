@@ -30,3 +30,19 @@ def test_sqlite_backup_snapshot_is_readable_and_independent(tmp_path):
     assert copied.execute("SELECT banner FROM observations").fetchone()[0] == "fixture"
     copied.close()
     source.close()
+
+
+def test_target_has_table_checks_columns_not_table_name():
+    """A normal PostgreSQL table exposes column names, never its own table name."""
+    from scripts.migrate_sqlite_to_postgresql import target_has_table
+
+    class FakeConnection:
+        def execute(self, sql, params):
+            assert "information_schema.columns" in sql
+            assert "table_schema=current_schema()" in sql
+            assert len(params) == 1
+            return [("token_hash",), ("created_at",)] if params[0] == "admin_sessions" else []
+
+    db = FakeConnection()
+    assert target_has_table(db, "admin_sessions")
+    assert not target_has_table(db, "nonexistent_table")
