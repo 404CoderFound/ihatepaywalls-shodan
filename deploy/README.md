@@ -1,5 +1,18 @@
 # PostgreSQL production template — not yet approved
 
+## Isolated Debian v2 staging (separate project)
+
+For the approval-gated v2 test environment, use
+[`DEBIAN_V2_STAGING_RUNBOOK.md`](DEBIAN_V2_STAGING_RUNBOOK.md) with
+[`compose.debian-v2-staging.yaml`](compose.debian-v2-staging.yaml). This
+configuration uses its own project-scoped PostgreSQL volume and internal-only
+network, publishes web only on `127.0.0.1:8081`, reads all credentials from
+external secret files, and hard-disables active scan and probe execution. It
+does not change the existing v1 two-file Compose project, its `web_default`
+network, `web_scanlattice_data`, or the AWS worker. The runbook contains the
+image build/pin instructions and the manual GO/NO-GO, verification, restore,
+and rollback gates. It has not been deployed to Debian by this change.
+
 This file is for review **only**. Nothing here deploys a service, edits the
 existing Docker project, or makes a production schema migration.
 

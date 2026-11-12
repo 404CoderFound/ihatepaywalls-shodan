@@ -231,8 +231,30 @@ class PostgreSQLBackend:
         import os
 
         dsn = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_DSN")
+        password_file = os.getenv("DATABASE_PASSWORD_FILE", "")
+        if password_file:
+            if dsn:
+                raise RuntimeError("Configure DATABASE_PASSWORD_FILE or DATABASE_URL, not both")
+            path = Path(password_file)
+            try:
+                info = path.stat()
+                if not path.is_file() or (info.st_mode & 0o777) not in {0o400, 0o440, 0o600}:
+                    raise RuntimeError("DATABASE_PASSWORD_FILE must be a regular file with mode 0400, 0440, or 0600")
+                password = path.read_text(encoding="utf-8").rstrip("\r\n")
+            except OSError as exc:
+                raise RuntimeError("Unable to read configured DATABASE_PASSWORD_FILE") from exc
+            if not password:
+                raise RuntimeError("Configured DATABASE_PASSWORD_FILE is empty")
+            from psycopg.conninfo import make_conninfo
+            dsn = make_conninfo(
+                host=os.getenv("DATABASE_HOST", "postgres"),
+                port=os.getenv("DATABASE_PORT", "5432"),
+                dbname=os.getenv("DATABASE_NAME", "scanlattice"),
+                user=os.getenv("DATABASE_USER", "scanlattice"),
+                password=password,
+            )
         if not dsn:
-            raise RuntimeError("DATABASE_URL is required when DATABASE_BACKEND=postgresql")
+            raise RuntimeError("DATABASE_URL or DATABASE_PASSWORD_FILE is required when DATABASE_BACKEND=postgresql")
         schema = os.getenv("DATABASE_SCHEMA", "public")
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", schema):
             raise RuntimeError("DATABASE_SCHEMA must be a valid PostgreSQL identifier")

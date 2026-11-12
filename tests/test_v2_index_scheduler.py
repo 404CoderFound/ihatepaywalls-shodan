@@ -35,7 +35,7 @@ def test_database_backend_seam_defaults_to_legacy_sqlite(system, monkeypatch):
     monkeypatch.setenv("DATABASE_BACKEND", "postgresql")
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("POSTGRES_DSN", raising=False)
-    with pytest.raises(RuntimeError, match="DATABASE_URL is required"):
+    with pytest.raises(RuntimeError, match="DATABASE_URL or DATABASE_PASSWORD_FILE is required"):
         with database.connection():
             pass
 

@@ -1,0 +1,95 @@
+name: scanlattice-v2-staging
+
+services:
+  postgres:
+    image: postgres:17.11-alpine@sha256:4717f90960a225c2d1c5dac50508c401230f693ff626e06e84e6db0a68ded508
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: scanlattice_staging
+      POSTGRES_USER: scanlattice_staging
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks: [staging_private]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scanlattice_staging -d scanlattice_staging"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    security_opt: ["no-new-privileges:true"]
+
+  web:
+    image: ${SCANLATTICE_WEB_IMAGE:?Set an immutable locally built v2 image digest}
+    platform: linux/amd64
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_BACKEND: postgresql
+      DATABASE_HOST: postgres
+      DATABASE_PORT: "5432"
+      DATABASE_NAME: scanlattice_staging
+      DATABASE_USER: scanlattice_staging
+      DATABASE_PASSWORD_FILE: /run/secrets/db_password
+      DATABASE_SCHEMA: public
+      ADMIN_TOKEN_FILE: /run/secrets/admin_token
+      ENROLLMENT_TOKEN_FILE: /run/secrets/enrollment_token
+      ACTIVE_SCANNING_ENABLED: "false"
+      PASSIVE_ENRICHMENT_ENABLED: "false"
+      MONITORING_AUTO_CHECKS: "false"
+      VULNERABILITY_AUTO_REFRESH: "false"
+      SEED_DEMO: "false"
+      SESSION_COOKIE_SECURE: "true"
+    secrets: [db_password, admin_token, enrollment_token]
+    ports:
+      - "127.0.0.1:8081:8080"
+    networks: [staging_private]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+
+  postgres-restore-test:
+    image: postgres:17.11-alpine@sha256:4717f90960a225c2d1c5dac50508c401230f693ff626e06e84e6db0a68ded508
+    platform: linux/amd64
+    profiles: [backup-restore-test]
+    environment:
+      POSTGRES_DB: restore_empty
+      POSTGRES_USER: scanlattice_restore
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    volumes:
+      - restore_test_data:/var/lib/postgresql/data
+    networks: [staging_private]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scanlattice_restore -d restore_empty"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    security_opt: ["no-new-privileges:true"]
+
+networks:
+  staging_private:
+    internal: true
+
+volumes:
+  postgres_data:
+  restore_test_data:
+
+secrets:
+  db_password:
+    file: ${SCANLATTICE_DB_PASSWORD_FILE:?Set staging-only DB secret file outside Git}
+  admin_token:
+    file: ${SCANLATTICE_ADMIN_TOKEN_FILE:?Set staging-only admin secret file outside Git}
+  enrollment_token:
+    file: ${SCANLATTICE_ENROLLMENT_TOKEN_FILE:?Set staging-only enrollment secret file outside Git}
