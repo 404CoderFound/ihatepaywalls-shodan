@@ -1,56 +1,129 @@
-# ScanLattice v2 — guarded production-import candidate
+# Guarded SQLite to PostgreSQL migration procedure
 
-**Preparation only. Not approved for a production cutover.**
+**Runbook preparation only. PostgreSQL startup, migration, traffic changes, and
+deployment are separate operator-approved production actions.** This importer
+does not stop writers, start services, deploy images, run scans, or switch
+traffic. Its dry-run is read-only against PostgreSQL. The execute path only
+writes to the exact database/schema supplied and refuses any non-empty or
+unrelated target.
 
-The existing migration script requires --target-is-disposable-staging, which
-MUST NOT be used against the permanent PostgreSQL service.
+## Source and target safety
 
-New entrypoint: scripts/import_production_sqlite_snapshot.py
+The importer requires all of the following before either dry-run or execute:
 
-- Defaults to a read-only preflight and does not deploy anything.
-- Requires an independently frozen SQLite backup with an operator-provided
-  SHA-256. Explicitly refuses a live scanlattice.db file, symlinks, hardlinks,
-  WAL/journal sidecars, source files inside the code checkout, failed SQLite
-  integrity, and files in known production volume paths.
-- Requires the exact expected PostgreSQL host and database, no other
-  PostgreSQL clients, and an empty target schema. An already completed,
-  checksum-matching import can be reverified. Unrelated or partial imports
-  are refused and require manual recovery.
-- A real import requires BOTH --execute and --acknowledge-writers-frozen.
-  Only an upgraded scratch COPY is imported. The source is never modified.
-- After import, all SQLite table counts and source column coverage are
-  reconciled with PostgreSQL. Five sample host identities are checked.
-- Does not restart the Debian web service, switch reverse proxy routing, or
-  connect to the real AWS scanner.
+- A frozen SQLite snapshot outside the checkout, created from a consistent
+  SQLite backup after all writers have been drained and stopped.
+- A separate verified rollback copy stored in the operator-approved backup
+  location. Both files must be regular, non-symlinked, single-link files with
+  mode `0600` or stricter, pass `PRAGMA integrity_check`, have no WAL/journal
+  sidecars, and match the supplied SHA-256. Snapshot and rollback copy must be
+  byte-identical but have distinct file identities.
+- An explicit PostgreSQL DSN host and database matching both the operator's
+  `--expected-host`/`--expected-database` values and the connected database.
+  Do not place credentials in command arguments or shell history.
+- A target schema that is empty, or a schema containing only a completed,
+  checksum-matching import of this exact snapshot. Existing tables, views,
+  foreign tables, materialized views, unrelated sequences, partial imports,
+  other client sessions, and mismatched import ledgers are rejected.
 
-## Offline Docker rehearsal
+The import preserves source IDs. Before declaring success it verifies source
+and target table inventories, source-column coverage, row counts, bounded
+order-independent ID fingerprints and maxima, host identity samples, and
+PostgreSQL identity-sequence alignment. The import ledger makes a matching
+completed invocation idempotent. Interrupted or inconsistent imports require
+manual investigation; do not drop or overwrite a schema to make a retry pass.
 
-The existing rehearsal script now additionally runs this new entrypoint,
-first in preflight-only mode, then executes and verifies an import into a
-SEPARATE new schema called production_rehearsal in its own disposable
-PostgreSQL Docker project. It reruns to validate completed-import behavior.
-It does not use the real PostgreSQL production volume.
+## GO / NO-GO gates
 
-On Mac (private SQLite copy outside repository, as previously used):
+**GO requires written operator approval for this exact source SHA, target
+host/database/schema, maintenance window, and rollback plan, plus every check
+below.** If any check fails or is unknown, the decision is NO-GO.
 
-    cd ~/scanlattice-v2-staging
-    git fetch origin
-    git switch --track origin/prep/v2-guarded-production-import
-    bash scripts/rehearse_postgresql_from_backup.sh ~/scanlattice-private/scanlattice-backup.db
-    echo "Guarded importer rehearsal exit status: $?"
+1. Drain ScannerAWS01 and stop every process that can write to the v1 SQLite
+   database. Verify there are no active or queued writers and scanning is
+   paused. Keep the v1 service and worker available only as explicitly planned
+   for the maintenance window; no scanner work may run during this procedure.
+2. Create a consistent SQLite backup using SQLite's backup API after the
+   write freeze. Copy it to a separate, protected rollback location. Record
+   both SHA-256 values independently; they must match. Store files mode `0600`
+   or stricter and retain an additional protected backup according to the
+   site's backup policy.
+3. Verify SQLite integrity, required ScanLattice tables, file ownership and
+   permissions, no sidecars, and unchanged hashes. Preserve the exact frozen
+   backup; never point this importer at the live `scanlattice.db` or a
+   production Docker volume path.
+4. Verify the target host/database/schema through a read-only preflight. The
+   PostgreSQL service must already exist in an approved isolated environment;
+   this runbook does not start production PostgreSQL. Confirm the schema is
+   empty and there are no other database clients.
+5. Rehearse the same backup hash and migration build against disposable local
+   PostgreSQL, including rollback and restore checks. Do not run discovery or
+   external scanning during rehearsal.
+6. Obtain explicit written GO approval. Record its change/ticket reference.
+   Only then run the execute command with `--execute`,
+   `--acknowledge-writers-frozen`, and `--go-approval-reference <approved-id>`.
+   The importer refuses execute without all three gates. They do not grant
+   deployment or traffic-switch permission.
 
-No GitHub Actions are required.
+Example dry-run. Keep the DSN in a protected environment or service manager;
+never echo it or put its password in a command line:
 
-## Release blockers before any production run
+```sh
+export DATABASE_URL='postgresql://<secret-managed-user>@<approved-host>:5432/<approved-db>'
+python3 scripts/import_production_sqlite_snapshot.py \
+  /secure/frozen/scanlattice-snapshot.sqlite \
+  --source-sha256 '<snapshot-sha256>' \
+  --rollback-backup /secure/rollback/scanlattice-snapshot.sqlite \
+  --rollback-backup-sha256 '<independently-verified-backup-sha256>' \
+  --expected-host '<approved-postgresql-host>' \
+  --expected-database '<approved-database>' \
+  --schema '<new-empty-migration-schema>'
+```
 
-- Drain AWS worker + all SQLite writers, verify jobs and capture final
-  frozen source snapshot SHA-256. The earlier snapshot is stale.
-- Review immutable image builds, web Compose override files, database
-  secrets and internal network.
-- Rehearse a PostgreSQL backup AND restore to a different empty database.
-- Verify worker compatibility beyond fake no-scanning registration, including
-  a deterministic offline result-batch life-cycle.
-- Approve maintenance and no-loss rollback strategy. After PostgreSQL
-  accepts writes, the SQLite snapshot is stale.
-- Production execution should be a separate explicitly authorized step:
-  never run --execute from instructions alone.
+The execute command is the same invocation with `--execute
+--acknowledge-writers-frozen --go-approval-reference <approved-id>`, and is
+allowed only after the GO gates and written approval. Do not run it as part of
+a deployment hook.
+
+## Rehearsal and tests
+
+For a private SQLite backup copy, the local rehearsal script starts its own
+uniquely named disposable Docker Compose project, generates staging-only
+credentials, binds the web test port to loopback, imports into PostgreSQL,
+checks API/worker behavior without scanner capabilities, verifies IDs,
+counts and sequences, and tears down only that project's resources. The
+script refuses a backup inside the checkout and never connects to a server.
+It also tests the guarded importer in dry-run mode, executes it only against a
+separate disposable schema with the frozen-writer acknowledgement, and checks
+completed-import idempotence.
+
+```sh
+bash scripts/rehearse_postgresql_from_backup.sh \
+  /private/local-copy/scanlattice-backup.sqlite
+```
+
+The standalone local tests for the guarded importer use synthetic SQLite
+files and fake PostgreSQL connections; they do not contact a live database.
+The Docker rehearsal is the integration check against disposable PostgreSQL.
+No GitHub Actions or CI run is required for this runbook.
+
+## Rollback and NO-GO
+
+Before PostgreSQL accepts application writes, the rollback point is the
+preserved frozen SQLite backup and the unchanged v1 Compose pair. Stop the
+candidate app/database only under the approved runbook and restore v1 routing
+manually after validating SQLite integrity and the v1 API/worker health.
+Never overwrite the original SQLite file or its only backup.
+
+After PostgreSQL accepts application writes, pointing v1 back to the old
+SQLite snapshot would lose those writes. Stop the cutover and keep PostgreSQL
+as the authoritative copy until a separately rehearsed reverse-export and
+reconciliation has produced and verified a new SQLite rollback copy. That
+reverse migration and all service/proxy changes are outside this importer.
+
+NO-GO conditions include any changed source hash, missing rollback copy,
+active writer/scanner, target identity mismatch, any unexpected target
+object/client, reconciliation or sequence mismatch, failed health checks,
+insufficient backup/storage verification, or absent operator approval.
+Production v1, AWS worker, secrets, PostgreSQL startup, network/proxy/DNS,
+migrations and traffic remain untouched until their own explicit approvals.

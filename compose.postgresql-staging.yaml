@@ -17,7 +17,9 @@ services:
     security_opt: ["no-new-privileges:true"]
 
   web-staging:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.rehearsal
     restart: unless-stopped
     depends_on:
       postgres:

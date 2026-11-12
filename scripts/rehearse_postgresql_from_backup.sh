@@ -54,11 +54,29 @@ cleanup() {
     echo "Migration rehearsal failed. Temporary container logs:" >&2
     compose logs --no-color --tail=50 >&2 || true
   fi
-  compose down --volumes >/dev/null 2>&1 || true
+  if ! compose down --rmi local --volumes >/dev/null 2>&1; then
+    echo "Unable to tear down the unique PostgreSQL rehearsal project cleanly: $PROJECT" >&2
+    status=1
+  fi
+  if docker image inspect "${PROJECT}-web-staging:latest" >/dev/null 2>&1 &&
+     ! docker image rm "${PROJECT}-web-staging:latest" >/dev/null 2>&1; then
+    echo "Unable to remove the local rehearsal image: $PROJECT" >&2
+    status=1
+  fi
+  if [ -n "$(compose ps --all --quiet 2>/dev/null || true)" ] || \
+     docker volume inspect "${PROJECT}_postgres_staging_data" >/dev/null 2>&1 || \
+     docker network inspect "${PROJECT}_default" >/dev/null 2>&1 || \
+     docker image inspect "${PROJECT}-web-staging:latest" >/dev/null 2>&1; then
+    echo "Temporary rehearsal resources remain after teardown: $PROJECT" >&2
+    status=1
+  fi
   rm -rf "$WORK_DIR"
+  exit "$status"
 }
-if [ -n "$(compose ps -q 2>/dev/null || true)" ] ||
-   docker volume inspect "$PROJECT"_postgres_staging_data >/dev/null 2>&1; then
+if [ -n "$(compose ps --all -q 2>/dev/null || true)" ] ||
+   docker volume inspect "${PROJECT}_postgres_staging_data" >/dev/null 2>&1 ||
+   docker network inspect "${PROJECT}_default" >/dev/null 2>&1 ||
+   docker image inspect "${PROJECT}-web-staging:latest" >/dev/null 2>&1; then
   echo "Staging project/volume already exists; refusing to reuse it." >&2
   exit 2
 fi
@@ -87,9 +105,8 @@ WEB_IMAGE=$(compose images -q web-staging)
 runner() {
   docker run --rm -i --user "$(id -u):$(id -g)" \
     --network "$PROJECT"_default \
-    --volume "$ROOT:/repo:ro" \
     --volume "$WORK_DIR:/work" \
-    --workdir /repo --env PYTHONPATH=/repo \
+    --workdir /srv --env PYTHONPATH=/srv \
     --env DATABASE_BACKEND=postgresql --env DATABASE_SCHEMA=rehearsal \
     --env "DATABASE_URL=postgresql://scanlattice:$STAGING_POSTGRES_PASSWORD@postgres:5432/scanlattice" \
     --env PASSIVE_ENRICHMENT_ENABLED=false \
@@ -143,12 +160,12 @@ print("PASS: original SQLite backup intact; private copy migrated to current SQL
 PY
 
 echo "Importing private SQLite COPY into isolated PostgreSQL"
-runner python /repo/scripts/migrate_sqlite_to_postgresql.py \
+runner python /srv/scripts/migrate_sqlite_to_postgresql.py \
   /work/source.sqlite --schema rehearsal --batch-size 500 \
   --target-is-disposable-staging
 
 echo "Verifying second import changes no data"
-runner python /repo/scripts/migrate_sqlite_to_postgresql.py \
+runner python /srv/scripts/migrate_sqlite_to_postgresql.py \
   /work/source.sqlite --schema rehearsal --batch-size 500 \
   --target-is-disposable-staging
 
@@ -196,25 +213,51 @@ finally:
 PY
 
 echo "Testing the actual v2 API against the migrated PostgreSQL COPY"
-runner python /repo/scripts/validate_migrated_postgresql_app.py
+runner python /srv/scripts/validate_migrated_postgresql_app.py
 
 echo "Testing fake, non-scanning worker API contract on migrated PostgreSQL"
-runner python /repo/scripts/validate_migrated_postgresql_worker_protocol.py
+runner python /srv/scripts/validate_migrated_postgresql_worker_protocol.py
+
+echo "Stopping the local staging web container before the single-client import guard"
+compose stop web-staging >/dev/null
 
 echo "Verifying guarded production importer in its OWN disposable schema"
 FROZEN_SOURCE_SHA=$(cat "$WORK_DIR/original.sha256")
-runner python /repo/scripts/import_production_sqlite_snapshot.py /work/backup_original.sqlite \
-  --source-sha256 "$FROZEN_SOURCE_SHA" --expected-host postgres \
+guarded_import() {
+  runner python - "$@" <<'PY'
+import runpy
+import shutil
+import sys
+from pathlib import Path
+
+for source, destination in (
+    (Path("/work/backup_original.sqlite"), Path("/tmp/guarded-snapshot.sqlite")),
+    (Path("/work/rollback.sqlite"), Path("/tmp/guarded-rollback.sqlite")),
+):
+    shutil.copyfile(source, destination)
+    destination.chmod(0o600)
+sys.argv = ["/srv/scripts/import_production_sqlite_snapshot.py",
+            "/tmp/guarded-snapshot.sqlite", *sys.argv[1:]]
+runpy.run_path(sys.argv[0], run_name="__main__")
+PY
+}
+guarded_import --source-sha256 "$FROZEN_SOURCE_SHA" \
+  --rollback-backup /tmp/guarded-rollback.sqlite \
+  --rollback-backup-sha256 "$FROZEN_SOURCE_SHA" --expected-host postgres \
   --expected-database scanlattice --schema production_rehearsal
-runner python /repo/scripts/import_production_sqlite_snapshot.py /work/backup_original.sqlite \
-  --source-sha256 "$FROZEN_SOURCE_SHA" --expected-host postgres \
+guarded_import --source-sha256 "$FROZEN_SOURCE_SHA" \
+  --rollback-backup /tmp/guarded-rollback.sqlite \
+  --rollback-backup-sha256 "$FROZEN_SOURCE_SHA" --expected-host postgres \
   --expected-database scanlattice --schema production_rehearsal \
-  --execute --acknowledge-writers-frozen
+  --execute --acknowledge-writers-frozen \
+  --go-approval-reference LOCAL-REHEARSAL-NOT-PRODUCTION
 echo "Verifying the guarded importer remains idempotent for the completed source"
-runner python /repo/scripts/import_production_sqlite_snapshot.py /work/backup_original.sqlite \
-  --source-sha256 "$FROZEN_SOURCE_SHA" --expected-host postgres \
+guarded_import --source-sha256 "$FROZEN_SOURCE_SHA" \
+  --rollback-backup /tmp/guarded-rollback.sqlite \
+  --rollback-backup-sha256 "$FROZEN_SOURCE_SHA" --expected-host postgres \
   --expected-database scanlattice --schema production_rehearsal \
-  --execute --acknowledge-writers-frozen
+  --execute --acknowledge-writers-frozen \
+  --go-approval-reference LOCAL-REHEARSAL-NOT-PRODUCTION
 
 echo "Backing up the guarded-import schema to a private PostgreSQL custom archive"
 POSTGRES_ARCHIVE="$WORK_DIR/scanlattice-production-rehearsal.dump"
@@ -233,7 +276,7 @@ compose exec -T postgres createdb -U scanlattice scanlattice_restore
 compose exec -T postgres pg_restore -U scanlattice -d scanlattice_restore \
   --exit-on-error --no-owner --no-acl < "$POSTGRES_ARCHIVE"
 echo "Comparing original and restored PostgreSQL schemas, table hashes and sequences"
-runner python /repo/scripts/verify_postgresql_restored_copy.py
+runner python /srv/scripts/verify_postgresql_restored_copy.py
 
 echo "Testing REST API against a separate disposable SQLite rollback COPY"
 runner python - <<'PY'
