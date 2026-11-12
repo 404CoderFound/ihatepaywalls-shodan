@@ -47,14 +47,21 @@ In the same controlled shell used for validation, set the path without
 printing or sourcing a production `.env` file:
 
 ```sh
-export SCANLATTICE_PG_PASSWORD_FILE=/etc/scanlattice/secrets/postgres-password
-docker compose --env-file /dev/null -p scanlattice-postgresql \
+sudo env SCANLATTICE_PG_PASSWORD_FILE=/etc/scanlattice/secrets/postgres-password \
+  docker compose --env-file /dev/null -p scanlattice-postgresql \
   -f deploy/compose.postgresql-production.yaml config --quiet
 ```
 
 `config --quiet` only validates Compose interpolation and syntax. Do not post
 rendered Compose output because it can expose paths and future configuration.
 This standalone file does not change either v1 Compose file.
+
+The password file is mode `0600` and root-owned, so Compose must run as root
+to read it. Compose also needs Docker-daemon socket access. Docker-group
+membership is effectively root; do not grant it to `scanlattice-deploy`.
+Use a controlled `sudo` invocation or an explicitly reviewed root-owned
+wrapper restricted to this Compose file and project. Do not make the secret
+group-readable or world-readable to support an unprivileged command.
 
 ## Approval-gated startup and verification
 
@@ -75,22 +82,25 @@ this PR**. Before an operator starts it, require all of the following:
 Only after those approvals, the operator may start the isolated database with:
 
 ```sh
-docker compose --env-file /dev/null -p scanlattice-postgresql \
+sudo env SCANLATTICE_PG_PASSWORD_FILE=/etc/scanlattice/secrets/postgres-password \
+  docker compose --env-file /dev/null -p scanlattice-postgresql \
   -f deploy/compose.postgresql-production.yaml up -d postgres
 ```
 
 Verify its state without printing environment values:
 
 ```sh
-docker compose --env-file /dev/null -p scanlattice-postgresql \
+sudo env SCANLATTICE_PG_PASSWORD_FILE=/etc/scanlattice/secrets/postgres-password \
+  docker compose --env-file /dev/null -p scanlattice-postgresql \
   -f deploy/compose.postgresql-production.yaml ps
-docker compose --env-file /dev/null -p scanlattice-postgresql \
+sudo env SCANLATTICE_PG_PASSWORD_FILE=/etc/scanlattice/secrets/postgres-password \
+  docker compose --env-file /dev/null -p scanlattice-postgresql \
   -f deploy/compose.postgresql-production.yaml exec -T postgres \
   pg_isready -U scanlattice -d scanlattice
-docker volume inspect scanlattice_v2_postgresql_data
-docker network inspect scanlattice_postgresql_private
-docker inspect --format '{{json .NetworkSettings.Ports}}' \
-  "$(docker compose --env-file /dev/null -p scanlattice-postgresql \
+sudo docker volume inspect scanlattice_v2_postgresql_data
+sudo docker network inspect scanlattice_postgresql_private
+sudo docker inspect --format '{{json .NetworkSettings.Ports}}' \
+  "$(sudo env SCANLATTICE_PG_PASSWORD_FILE=/etc/scanlattice/secrets/postgres-password docker compose --env-file /dev/null -p scanlattice-postgresql \
     -f deploy/compose.postgresql-production.yaml ps -q postgres)"
 ```
 
@@ -106,9 +116,11 @@ PostgreSQL project. Preserve the data volume for investigation or an approved
 restore; do not use `down -v`, volume prune, or a project name used by v1:
 
 ```sh
-docker compose --env-file /dev/null -p scanlattice-postgresql \
+sudo env SCANLATTICE_PG_PASSWORD_FILE=/etc/scanlattice/secrets/postgres-password \
+  docker compose --env-file /dev/null -p scanlattice-postgresql \
   -f deploy/compose.postgresql-production.yaml stop postgres
-docker compose --env-file /dev/null -p scanlattice-postgresql \
+sudo env SCANLATTICE_PG_PASSWORD_FILE=/etc/scanlattice/secrets/postgres-password \
+  docker compose --env-file /dev/null -p scanlattice-postgresql \
   -f deploy/compose.postgresql-production.yaml down
 ```
 

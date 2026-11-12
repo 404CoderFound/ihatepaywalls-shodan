@@ -8,6 +8,11 @@ from pathlib import Path
 
 import pytest
 
+from scripts.smoke_postgresql_production_template import (
+    SmokeTestError,
+    validate_rendered_config,
+)
+
 
 ROOT = Path(__file__).parents[1]
 COMPOSE = ROOT / "deploy" / "compose.postgresql-production.yaml"
@@ -51,6 +56,37 @@ def test_v1_compose_pair_and_pinned_rollback_image_are_documented_unchanged():
     assert "Preserve" in checklist or "preserve" in checklist
 
 
+def test_staging_rehearsal_uses_the_current_integration_branch():
+    readme = (ROOT / "deploy" / "README.md").read_text()
+    assert "origin/feature/v2-integrated-pg-scanner" in readme
+    assert "origin/prep/v2-postgresql-prod-template-worker-contract" not in readme
+
+
+def test_documented_compose_privileges_keep_secret_root_only():
+    readme = (ROOT / "deploy" / "README.md").read_text()
+    preparation = (ROOT / "deploy" / "PRODUCTION_POSTGRES_PREPARATION.md").read_text()
+    combined = readme + preparation
+    assert "root:root" in combined and "0600" in combined
+    assert "sudo env SCANLATTICE_PG_PASSWORD_FILE=" in combined
+    assert "docker` group" in combined
+
+
+def test_smoke_runner_rejects_published_ports():
+    rendered = {
+        "services": {
+            "postgres": {
+                "ports": [{"target": 5432, "published": "5432", "host_ip": "0.0.0.0"}],
+                "networks": {"postgres_private": None},
+                "volumes": [{"type": "volume", "source": "pgdata", "target": "/var/lib/postgresql/data"}],
+            }
+        },
+        "networks": {"postgres_private": {"name": "test_private", "internal": True}},
+        "volumes": {"pgdata": {"name": "test_data"}},
+    }
+    with pytest.raises(SmokeTestError, match="publishes a host port"):
+        validate_rendered_config(rendered, "test_private", "test_data")
+
+
 @pytest.mark.skipif(shutil.which("docker") is None, reason="Docker Compose CLI is unavailable")
 def test_docker_compose_config_resolves_private_network_and_persistent_volume(tmp_path):
     password_file = tmp_path / "postgres-password"
@@ -73,7 +109,7 @@ def test_docker_compose_config_resolves_private_network_and_persistent_volume(tm
     rendered = json.loads(result.stdout)
     service = rendered["services"]["postgres"]
     assert not service.get("ports")
-    assert service["networks"] == {"postgres_private": None} or "postgres_private" in service["networks"]
+    assert set(service["networks"]) == {"postgres_private"}
     assert rendered["networks"]["postgres_private"]["internal"] is True
     assert rendered["volumes"]["pgdata"]["name"] == "scanlattice_v2_postgresql_data"
     assert service["volumes"][0]["target"] == "/var/lib/postgresql/data"
