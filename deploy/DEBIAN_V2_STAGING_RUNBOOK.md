@@ -123,9 +123,9 @@ sha256sum /tmp/scanlattice-v2-staging-<reviewed-commit>.tar
 
 The image built for this PR is pinned in
 [`debian-v2-staging-image.lock`](debian-v2-staging-image.lock): source commit
-`f2468f9415b45beec032380b8e387b7ede7c48c2`, platform `linux/amd64`, Docker
-image ID `sha256:a0345b9c98c5ba20383cd3307defc41cac3d90c0a0e30f0340830bad520f0773`,
-and AMD64 manifest `sha256:2463340970919e7afc7b15da11ed4dc901805a28514263e9d9f940ba5f83d4ca`.
+`4f5b1beb18a8380a7763af2a0c45d69f825aa8f1`, platform `linux/amd64`, Docker
+image ID `sha256:d3351b3b7a5a14254cc0a06a4f9a5cdec00bf8772845306f9b3bdf7edc956678`,
+and AMD64 manifest `sha256:c747ee2b4f266fdf22040bc202c7711ce155ea7bff60ab7e5345a9dcd9f44d4b`.
 The image label records the source commit. Rebuild and update this lock whenever
 the app, Dockerfile, or dependency lock changes; verify the label and
 architecture before deployment. Set `SCANLATTICE_WEB_IMAGE` to the exact
