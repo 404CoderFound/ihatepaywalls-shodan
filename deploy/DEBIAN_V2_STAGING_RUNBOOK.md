@@ -13,9 +13,11 @@ staging bridge to external interfaces before the GO gate passes.
 
 The operator must record **GO** for each item before starting services:
 
-1. Confirm the current source branch and exact commit are the reviewed staging PR
-   commit; confirm the x86_64 image ID/digest was built from that commit and
-   matches the Compose `SCANLATTICE_WEB_IMAGE` value.
+1. Confirm the image `source_commit` in the lock file is an ancestor of the
+   reviewed staging PR head, and that no `app/`, `migrations/`, staging
+   Dockerfile, or runtime dependency-lock changes occurred after that source
+   commit. Confirm the x86_64 image ID/digest in the lock matches the Compose
+   `SCANLATTICE_WEB_IMAGE` value.
 2. Confirm the project name, network names and volume names below do not exist
    already, and that nothing uses `127.0.0.1:8081`.
 3. Confirm all three fresh staging-only secret files exist outside Git, are
