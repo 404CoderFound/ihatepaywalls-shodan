@@ -192,6 +192,21 @@ runner python /repo/scripts/validate_migrated_postgresql_app.py
 echo "Testing fake, non-scanning worker API contract on migrated PostgreSQL"
 runner python /repo/scripts/validate_migrated_postgresql_worker_protocol.py
 
+echo "Verifying guarded production importer in its OWN disposable schema"
+FROZEN_SOURCE_SHA=$(cat "$WORK_DIR/original.sha256")
+runner python /repo/scripts/import_production_sqlite_snapshot.py /work/backup_original.sqlite \
+  --source-sha256 "$FROZEN_SOURCE_SHA" --expected-host postgres \
+  --expected-database scanlattice --schema production_rehearsal
+runner python /repo/scripts/import_production_sqlite_snapshot.py /work/backup_original.sqlite \
+  --source-sha256 "$FROZEN_SOURCE_SHA" --expected-host postgres \
+  --expected-database scanlattice --schema production_rehearsal \
+  --execute --acknowledge-writers-frozen
+echo "Verifying the guarded importer remains idempotent for the completed source"
+runner python /repo/scripts/import_production_sqlite_snapshot.py /work/backup_original.sqlite \
+  --source-sha256 "$FROZEN_SOURCE_SHA" --expected-host postgres \
+  --expected-database scanlattice --schema production_rehearsal \
+  --execute --acknowledge-writers-frozen
+
 echo "Testing REST API against a separate disposable SQLite rollback COPY"
 runner python - <<'PY'
 import hashlib
