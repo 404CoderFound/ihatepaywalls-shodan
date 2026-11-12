@@ -5,9 +5,10 @@ existing Docker project, or makes a production schema migration.
 
 `deploy/compose.postgresql-production.yaml` defines a separate PostgreSQL 17
 container with persistent volume `scanlattice_v2_postgresql_data`, joining
-only the externally managed network `web_default`. TCP 5432 is **not**
-published onto the host or internet. The existing SQLite volume
-`web_scanlattice_data` is never mounted, referenced or modified.
+only the dedicated internal Docker bridge `scanlattice_postgresql_private`.
+TCP 5432 is **not** published onto the host or internet. The existing SQLite
+volume `web_scanlattice_data` is never mounted, referenced or modified. The
+v1 web service is not attached to the PostgreSQL network by this preparation.
 
 A strong database password must be stored in a root-protected file **outside**
 the repository and supplied by the
@@ -18,6 +19,15 @@ project `scanlattice-aws` and external volume `worker_worker_state`
 remain unchanged; the worker does not connect to PostgreSQL directly.
 
 ## Local validation before any deployment
+
+Run the production Compose safety tests with the normal pytest suite. They
+check that 5432 is not published, the network is internal, the PostgreSQL
+data directory uses its dedicated persistent volume, and credentials come
+from an external file path. When Docker Compose is available, an additional
+test renders the Compose file with a temporary local-only secret file; it
+does not create resources. See
+[`PRODUCTION_POSTGRES_PREPARATION.md`](PRODUCTION_POSTGRES_PREPARATION.md)
+for the approval-gated host steps, verification, and rollback.
 
 On the Mac testing checkout, run:
 
