@@ -1,5 +1,6 @@
 # TEMPLATE ONLY: do not start against production without explicit approval.
 # Use a Compose project separate from 'web'. No host TCP port is published.
+# The internal bridge is intentionally isolated from the existing v1 web stack.
 services:
   postgres:
     image: postgres:17.11-alpine
@@ -13,7 +14,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
-      - web
+      - postgres_private
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U scanlattice -d scanlattice"]
       interval: 10s
@@ -32,6 +33,7 @@ volumes:
     name: scanlattice_v2_postgresql_data
 
 networks:
-  web:
-    external: true
-    name: web_default
+  postgres_private:
+    name: scanlattice_postgresql_private
+    driver: bridge
+    internal: true
