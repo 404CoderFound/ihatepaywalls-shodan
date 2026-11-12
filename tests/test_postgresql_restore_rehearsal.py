@@ -15,7 +15,7 @@ def test_restore_drill_never_invokes_production_compose():
     assert '--no-owner --no-acl' in segment
     assert '--exit-on-error' in segment
     assert '--schema=production_rehearsal' in segment
-    assert 'runner python /repo/scripts/verify_postgresql_restored_copy.py' in segment
+    assert 'runner python /srv/scripts/verify_postgresql_restored_copy.py' in segment
     assert 'docker compose -p web' not in segment
     assert 'web_scanlattice_data' not in segment
     assert 'worker_worker_state' not in segment
