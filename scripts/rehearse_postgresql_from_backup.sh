@@ -111,13 +111,22 @@ from pathlib import Path
 from app import database
 
 original = Path("/work/backup_original.sqlite")
-db = sqlite3.connect(f"file:{original}?mode=ro", uri=True)
+# The offline SQLite snapshot may retain a WAL-mode database header.
+# Even mode=ro can create -wal/-shm sidecars on close, causing the guarded
+# production importer to reject this otherwise valid private backup.
+# immutable=1 is safe here because this is a private, static backup COPY.
+db = sqlite3.connect(f"file:{original}?mode=ro&immutable=1", uri=True)
 try:
     assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok", "Backup failed SQLite integrity_check"
     tables = db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
     assert tables > 0, "Backup contains no tables"
 finally:
     db.close()
+# A staging-only read must not create WAL/journal sidecars on the approved
+# original snapshot. Refuse to proceed if it does.
+assert not any(Path(str(original) + ext).exists() for ext in ("-wal", "-shm", "-journal")), (
+    "Frozen original backup unexpectedly acquired SQLite WAL/journal sidecars"
+)
 shutil.copyfile(original, "/work/rollback.sqlite")
 shutil.copyfile(original, "/work/source.sqlite")
 Path("/work/original.sha256").write_text(hashlib.sha256(original.read_bytes()).hexdigest())
