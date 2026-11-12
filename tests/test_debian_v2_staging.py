@@ -35,6 +35,8 @@ def test_debian_staging_compose_is_loopback_only_internal_and_persistent():
     assert 'name: scanlattice-v2-staging' in content
     assert '127.0.0.1:8081:8080' in content
     assert 'internal: true' in content
+    assert 'com.docker.network.bridge.enable_ip_masquerade: "false"' in content
+    assert 'networks: [staging_private, staging_loopback]' in content
     assert '/var/lib/postgresql/data' in content
     assert 'POSTGRES_PASSWORD_FILE: /run/secrets/db_password' in content
     assert 'DATABASE_PASSWORD_FILE: /run/secrets/db_password' in content
@@ -45,3 +47,12 @@ def test_debian_staging_compose_is_loopback_only_internal_and_persistent():
     assert 'DATABASE_URL:' not in content
     assert 'ADMIN_TOKEN:' not in content
     assert 'ENROLLMENT_TOKEN:' not in content
+
+
+def test_staging_image_lock_pins_reviewed_amd64_build():
+    lock = Path(__file__).parents[1] / "deploy" / "debian-v2-staging-image.lock"
+    content = lock.read_text(encoding="utf-8")
+    assert "source_commit=f2468f9415b45beec032380b8e387b7ede7c48c2" in content
+    assert "platform=linux/amd64" in content
+    assert "platform_manifest=sha256:2463340970919e7afc7b15da11ed4dc901805a28514263e9d9f940ba5f83d4ca" in content
+    assert "docker_image_id=sha256:a0345b9c98c5ba20383cd3307defc41cac3d90c0a0e30f0340830bad520f0773" in content

@@ -47,7 +47,7 @@ services:
     secrets: [db_password, admin_token, enrollment_token]
     ports:
       - "127.0.0.1:8081:8080"
-    networks: [staging_private]
+    networks: [staging_private, staging_loopback]
     read_only: true
     tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
     security_opt: ["no-new-privileges:true"]
@@ -81,6 +81,11 @@ services:
 networks:
   staging_private:
     internal: true
+  staging_loopback:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+      com.docker.network.bridge.host_binding_ipv4: "127.0.0.1"
 
 volumes:
   postgres_data:

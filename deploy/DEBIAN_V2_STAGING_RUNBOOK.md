@@ -3,8 +3,11 @@
 This runbook prepares only the separate Compose project `scanlattice-v2-staging`.
 It does not modify the v1 Compose project, `web_scanlattice_data`, port 8080,
 reverse proxy, DNS, AWS worker, or production PostgreSQL. Do not run it against
-production data. The staging web container has no external network route, active
-worker API is disabled, and no worker service is included.
+production data. PostgreSQL is only on the internal database network. Web joins
+that private network and a separate host-ingress bridge with IP masquerading
+disabled; the application kill switch blocks worker/job execution and no worker
+service is included. The host firewall must also deny forwarding from the
+staging bridge to external interfaces before the GO gate passes.
 
 ## Explicit GO gates
 
@@ -24,11 +27,57 @@ The operator must record **GO** for each item before starting services:
    or inspect the live production SQLite database automatically. This runbook
    starts empty PostgreSQL; importing any backup is a separate reviewed action.
 5. Confirm no scan/worker credentials or AWS worker are connected, active
-   scanning is false, and the app cannot reach external networks.
+   scanning is false, and host firewall policy blocks forwarding from the
+   project-specific staging bridge to external interfaces. The Docker network
+   must have IP masquerading disabled as defense in depth.
 6. Approve the staging-only startup command below. Production deployment still
    requires separate explicit authorization.
 
 Any failed or unknown item is **NO-GO**.
+
+## Local validation before the Debian GO gate
+
+Run these checks on a developer machine with a local Unix-socket Docker
+context, never on a production Docker context. Use the image ID produced from
+the reviewed source commit:
+
+```bash
+python3 scripts/smoke_debian_v2_staging.py \
+  --image sha256:<recorded-image-config-id>
+```
+
+The smoke test generates disposable credentials, uses a unique Compose project
+and volumes, verifies the live API/admin/search/scan-kill-switch behavior,
+restarts PostgreSQL and the web container to check persistence, backs up and
+restores into a separate empty PostgreSQL service, checks logs for the generated
+credentials, and removes only its own resources. It refuses remote Docker
+contexts and refuses to use port 8081 when already occupied.
+
+Also exercise the full guarded SQLite-to-PostgreSQL importer and fake-worker
+contract using only a synthetic database with TEST-NET documentation data. Do
+not substitute a production database or production backup:
+
+```bash
+WORK_DIR=$(mktemp -d /tmp/scanlattice-v2-rehearsal.XXXXXX)
+trap 'python3 -c "import shutil,sys; shutil.rmtree(sys.argv[1], ignore_errors=True)" "$WORK_DIR"' EXIT
+DATABASE_BACKEND=sqlite DATABASE_PATH="$WORK_DIR/synthetic.sqlite" python3 - <<'PY'
+import os
+from pathlib import Path
+from app import database
+database.DB_PATH = Path(os.environ["DATABASE_PATH"])
+database.init_db(False)
+with database.connection() as db:
+    database.upsert_host_identity(db, "192.0.2.77", "synthetic-local-rehearsal", database.utc_now())
+PY
+bash scripts/rehearse_postgresql_from_backup.sh "$WORK_DIR/synthetic.sqlite"
+```
+
+The rehearsal starts its own disposable PostgreSQL project and verifies table
+schemas/counts, IDs, sequences, import idempotence, PostgreSQL backup/restore,
+API/search/admin behavior, fake worker registration/heartbeat/empty claim, and
+SQLite rollback. The live app configuration remains scan-disabled; only the
+isolated fake-worker test client enables the registration protocol, and it
+uses no scan-capable worker or target.
 
 ## Read-only preflight and inventory
 
@@ -69,6 +118,16 @@ docker save scanlattice-v2-staging:<reviewed-commit> \
   -o /tmp/scanlattice-v2-staging-<reviewed-commit>.tar
 sha256sum /tmp/scanlattice-v2-staging-<reviewed-commit>.tar
 ```
+
+The image built for this PR is pinned in
+[`debian-v2-staging-image.lock`](debian-v2-staging-image.lock): source commit
+`f2468f9415b45beec032380b8e387b7ede7c48c2`, platform `linux/amd64`, Docker
+image ID `sha256:a0345b9c98c5ba20383cd3307defc41cac3d90c0a0e30f0340830bad520f0773`,
+and AMD64 manifest `sha256:2463340970919e7afc7b15da11ed4dc901805a28514263e9d9f940ba5f83d4ca`.
+The image label records the source commit. Rebuild and update this lock whenever
+the app, Dockerfile, or dependency lock changes; verify the label and
+architecture before deployment. Set `SCANLATTICE_WEB_IMAGE` to the exact
+`docker_image_id` value from this lock.
 
 Compare the output to `linux/amd64`, record `IMAGE_ID=sha256:...` and set
 `SCANLATTICE_WEB_IMAGE` to that immutable local image ID in the root-only
@@ -132,7 +191,9 @@ Review the resolved configuration and confirm all of the following before GO:
 - only project `scanlattice-v2-staging` and its newly scoped resources appear;
 - `web` publishes only `127.0.0.1:8081` to container port 8080;
 - no service publishes 5432; PostgreSQL is attached only to `staging_private`,
-  whose `internal` flag is true;
+  whose `internal` flag is true. Web attaches to this and `staging_loopback`, a
+  separate bridge whose IP masquerading is disabled and whose host binding
+  defaults to `127.0.0.1`;
 - only the dedicated `postgres_data` and optional restore-test volumes are
   referenced; no v1 or AWS volumes are referenced;
 - web image is the recorded immutable x86_64 image ID;
@@ -140,6 +201,18 @@ Review the resolved configuration and confirm all of the following before GO:
 - `ACTIVE_SCANNING_ENABLED`, passive enrichment, scheduled monitoring,
   vulnerability refresh and demo seeding are all disabled;
 - no worker service or AWS credentials exist in the resolved model.
+
+Before starting services, install/verify the host firewall rule in the
+approved Debian firewall management system so forwarded packets arriving from
+the `staging_loopback` Docker bridge cannot leave through another host
+interface. Identify the bridge using
+`docker network inspect --format '{{.Id}}' scanlattice-v2-staging_staging_loopback`
+(`br-` plus the first 12 ID characters on Debian). Read back the effective
+nftables/iptables policy and confirm it drops `iif=<that bridge>` to any
+non-bridge output interface while permitting the loopback-published web path.
+Do not change shared Docker chains or production rules without a separate
+reviewed staging firewall change. If the active firewall cannot express and
+verify this scoped deny, stop: **NO-GO**.
 
 If Compose shows any resolved password/token value, any public bind, or any
 existing production volume/network, stop: **NO-GO**.
@@ -154,8 +227,9 @@ sudo docker compose --project-name scanlattice-v2-staging \
   -f deploy/compose.debian-v2-staging.yaml up -d postgres web
 ```
 
-Then verify health, loopback-only port mapping, internal network, and that the
-web health response reports `active_scanning: false`:
+Then verify health, loopback-only port mapping, private/internal DB network,
+host firewall egress-deny policy, and that the web health response reports
+`active_scanning: false`:
 
 ```bash
 sudo docker compose --project-name scanlattice-v2-staging \
@@ -164,6 +238,7 @@ sudo docker compose --project-name scanlattice-v2-staging \
 sudo docker inspect scanlattice-v2-staging-web-1 --format '{{json .NetworkSettings.Ports}}'
 curl --fail --silent http://127.0.0.1:8081/api/health
 sudo docker network inspect scanlattice-v2-staging_staging_private
+sudo docker network inspect scanlattice-v2-staging_staging_loopback
 sudo docker volume ls --filter label=com.docker.compose.project=scanlattice-v2-staging
 ```
 
@@ -196,7 +271,7 @@ sudo docker compose --project-name scanlattice-v2-staging \
 sudo sh -c 'docker compose --project-name scanlattice-v2-staging \
   --env-file /etc/scanlattice-v2-staging/compose.env \
   -f deploy/compose.debian-v2-staging.yaml exec -T postgres-restore-test \
-  pg_restore --exit-on-error --no-owner --role=scanlattice_restore \
+  pg_restore -U scanlattice_restore --exit-on-error --no-owner --role=scanlattice_restore \
   -d restore_empty < /var/backups/scanlattice-v2-staging.dump'
 sudo docker compose --project-name scanlattice-v2-staging \
   --env-file /etc/scanlattice-v2-staging/compose.env \
@@ -219,7 +294,9 @@ rollback remains governed by its separate cutover approval and is out of scope.
 ## Release status
 
 No Debian deployment, production database start, migration, worker enrollment,
-proxy/DNS edit, or CI run is authorized by this preparation. Local Docker
-Compose validation, an actual disposable PostgreSQL restore, and the image ID
-must be recorded from a Docker-capable isolated builder before the staging GO
-gate can pass.
+proxy/DNS edit, or CI run is authorized by this preparation. The local image
+build, Compose/API/persistence checks, PostgreSQL backup/restore, and synthetic
+SQLite migration/fake-worker rehearsal passed. Debian staging remains **NO-GO**
+until its read-only preflight, fresh external secrets, exact image ID check,
+project resource inventory, and scoped egress-deny firewall rule are verified
+and the operator records explicit staging approval.

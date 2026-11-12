@@ -29,6 +29,7 @@ services:
       DATABASE_URL: postgresql://scanlattice:${STAGING_POSTGRES_PASSWORD}@postgres:5432/scanlattice
       DATABASE_SCHEMA: public
       DATABASE_PATH: /tmp/unused-sqlite.db
+      ACTIVE_SCANNING_ENABLED: "false"
       ADMIN_TOKEN: ${STAGING_ADMIN_TOKEN:?Set a staging-only admin token}
       ENROLLMENT_TOKEN: ${STAGING_ENROLLMENT_TOKEN:?Set a staging-only enrollment token}
       SESSION_COOKIE_SECURE: "false"

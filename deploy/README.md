@@ -11,7 +11,9 @@ external secret files, and hard-disables active scan and probe execution. It
 does not change the existing v1 two-file Compose project, its `web_default`
 network, `web_scanlattice_data`, or the AWS worker. The runbook contains the
 image build/pin instructions and the manual GO/NO-GO, verification, restore,
-and rollback gates. It has not been deployed to Debian by this change.
+and rollback gates. The current locally built x86_64 image identity is recorded
+in [`debian-v2-staging-image.lock`](debian-v2-staging-image.lock). It has not
+been deployed to Debian by this change.
 
 This file is for review **only**. Nothing here deploys a service, edits the
 existing Docker project, or makes a production schema migration.
