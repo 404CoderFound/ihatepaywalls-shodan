@@ -14,6 +14,7 @@ def test_rehearsal_original_backup_read_never_creates_wal_sidecars(tmp_path):
         assert live.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
         live.execute("CREATE TABLE data(id INTEGER PRIMARY KEY, label TEXT)")
         live.execute("INSERT INTO data VALUES(1,'fixture')")
+        live.commit()  # Finish WAL transaction before taking online backup.
         with sqlite3.connect(snapshot) as backup:
             live.backup(backup)
     assert snapshot.read_bytes()[18:20] == bytes([2, 2])  # SQLite WAL header
