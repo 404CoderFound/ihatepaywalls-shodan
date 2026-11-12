@@ -1,5 +1,5 @@
-# Base image digest is the x86_64 (linux/amd64) manifest digest for Python 3.13 slim.
-FROM --platform=linux/amd64 python:3.13-slim@sha256:48d884813cf44e927cf64c5529dd630dd3b18338c6dc727991eef9b71e934a20
+# Base digest is the x86_64 manifest. Buildx selects linux/amd64 at build time.
+FROM python:3.13-slim@sha256:48d884813cf44e927cf64c5529dd630dd3b18338c6dc727991eef9b71e934a20
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.revision=$VCS_REF org.opencontainers.image.source="https://github.com/404CoderFound/ihatepaywalls-shodan"
 WORKDIR /srv
