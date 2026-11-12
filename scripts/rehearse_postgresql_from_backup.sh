@@ -216,6 +216,25 @@ runner python /repo/scripts/import_production_sqlite_snapshot.py /work/backup_or
   --expected-database scanlattice --schema production_rehearsal \
   --execute --acknowledge-writers-frozen
 
+echo "Backing up the guarded-import schema to a private PostgreSQL custom archive"
+POSTGRES_ARCHIVE="$WORK_DIR/scanlattice-production-rehearsal.dump"
+# The PostgreSQL container belongs ONLY to the disposable Mac Compose project.
+# Use the PostgreSQL client in that container; never publish a host DB port.
+compose exec -T postgres pg_dump -U scanlattice -d scanlattice \
+  --format=custom --no-owner --no-acl --schema=production_rehearsal \
+  > "$POSTGRES_ARCHIVE"
+[ -s "$POSTGRES_ARCHIVE" ] || {
+  echo "pg_dump produced an empty archive" >&2
+  exit 1
+}
+compose exec -T postgres pg_restore --list < "$POSTGRES_ARCHIVE" >/dev/null
+echo "Restoring the PostgreSQL archive into a NEW, empty, isolated database"
+compose exec -T postgres createdb -U scanlattice scanlattice_restore
+compose exec -T postgres pg_restore -U scanlattice -d scanlattice_restore \
+  --exit-on-error --no-owner --no-acl < "$POSTGRES_ARCHIVE"
+echo "Comparing original and restored PostgreSQL schemas, table hashes and sequences"
+runner python /repo/scripts/verify_postgresql_restored_copy.py
+
 echo "Testing REST API against a separate disposable SQLite rollback COPY"
 runner python - <<'PY'
 import hashlib
