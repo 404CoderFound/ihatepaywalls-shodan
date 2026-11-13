@@ -115,16 +115,17 @@ production host for local build validation.
 ## Prepare image and secrets
 
 Build from the exact reviewed source commit on an x86_64 builder, then record
-the resulting image config ID. Buildx must use the pinned `linux/amd64` base
-manifest and fully pinned Python dependency lock:
+the immutable image ID and AMD64 manifest digest. Buildx must use the pinned
+`linux/amd64` base manifest and version-locked Python dependency file:
 
 ```bash
 git checkout --detach <reviewed-commit>
-docker buildx build --platform linux/amd64 --load \
+docker buildx build --platform linux/amd64 --load --provenance=false \
+  --metadata-file /tmp/scanlattice-v2-build-metadata.json \
   --build-arg VCS_REF=<reviewed-commit> \
   -f Dockerfile.debian-staging -t scanlattice-v2-staging:<reviewed-commit> .
 docker image inspect scanlattice-v2-staging:<reviewed-commit> \
-  --format 'IMAGE_ID={{.Id}} ARCH={{.Architecture}} OS={{.Os}}'
+  --format 'IMAGE_ID={{.Id}} ARCH={{.Architecture}} OS={{.Os}} REVISION={{index .Config.Labels "org.opencontainers.image.revision"}}'
 docker save scanlattice-v2-staging:<reviewed-commit> \
   -o /tmp/scanlattice-v2-staging-<reviewed-commit>.tar
 sha256sum /tmp/scanlattice-v2-staging-<reviewed-commit>.tar
@@ -132,12 +133,17 @@ sha256sum /tmp/scanlattice-v2-staging-<reviewed-commit>.tar
 
 The image built for this PR is pinned in
 [`debian-v2-staging-image.lock`](debian-v2-staging-image.lock): source commit
-`4f5b1beb18a8380a7763af2a0c45d69f825aa8f1`, platform `linux/amd64`, Docker
-image ID `sha256:d3351b3b7a5a14254cc0a06a4f9a5cdec00bf8772845306f9b3bdf7edc956678`,
-and AMD64 manifest `sha256:c747ee2b4f266fdf22040bc202c7711ce155ea7bff60ab7e5345a9dcd9f44d4b`.
-The image label records the source commit. Rebuild and update this lock whenever
-the app, Dockerfile, or dependency lock changes; verify the label and
-architecture before deployment. Set `SCANLATTICE_WEB_IMAGE` to the exact
+`aa0c2e6b53a8053f438cacbf3bdc5ff19fa0951e`, platform `linux/amd64`, image and
+platform manifest digest
+`sha256:3e1348c530a823e886a9f68b7e2b44665058b06c3c263f3de701d0eefd812f46`, and
+config digest `sha256:324958b57d194d97b686278558c2595b029541b62ce707fab4ac3cb27893143b`.
+The lock also records the exact base and dependency-lock SHA-256. The image
+label records the full source commit, and Buildx metadata records the source
+revision, build argument and pinned AMD64 Python base. Rebuild with
+`--provenance=false` to produce the single-platform manifest whose digest
+matches the local Docker image ID; archive it with `docker save`, verify the
+archive checksum, and update this lock whenever the app, Dockerfile, or
+dependency lock changes. Set `SCANLATTICE_WEB_IMAGE` to the exact
 `docker_image_id` value from this lock.
 
 Compare the output to `linux/amd64`, record `IMAGE_ID=sha256:...` and set
@@ -152,7 +158,7 @@ use:
 ```bash
 sha256sum --check /path/to/approved-image.tar.sha256
 sudo docker load --input /path/to/approved-image.tar
-sudo docker image inspect sha256:<recorded-image-config-id> \
+sudo docker image inspect sha256:<recorded-image-id> \
   --format 'IMAGE_ID={{.Id}} ARCH={{.Architecture}} OS={{.Os}}'
 ```
 

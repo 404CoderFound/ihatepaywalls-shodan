@@ -53,10 +53,14 @@ def test_debian_staging_compose_is_loopback_only_internal_and_persistent():
 def test_staging_image_lock_pins_reviewed_amd64_build():
     lock = Path(__file__).parents[1] / "deploy" / "debian-v2-staging-image.lock"
     content = lock.read_text(encoding="utf-8")
-    assert "source_commit=4f5b1beb18a8380a7763af2a0c45d69f825aa8f1" in content
+    assert "source_commit=aa0c2e6b53a8053f438cacbf3bdc5ff19fa0951e" in content
     assert "platform=linux/amd64" in content
-    assert "platform_manifest=sha256:c747ee2b4f266fdf22040bc202c7711ce155ea7bff60ab7e5345a9dcd9f44d4b" in content
-    assert "docker_image_id=sha256:d3351b3b7a5a14254cc0a06a4f9a5cdec00bf8772845306f9b3bdf7edc956678" in content
+    assert "python_dependency_lock_sha256=df7101ed28e3864b2830aa5b7ff3d3f201e9e29e348c83d7f5c0dbf0ef267f8c" in content
+    assert "image_revision_label=aa0c2e6b53a8053f438cacbf3bdc5ff19fa0951e" in content
+    assert "docker_config_digest=sha256:324958b57d194d97b686278558c2595b029541b62ce707fab4ac3cb27893143b" in content
+    assert "image_archive_sha256=04f9205814f2368d872e6e286519c44e1f0c7a105729b3308b86333b110daa58" in content
+    assert "platform_manifest=sha256:3e1348c530a823e886a9f68b7e2b44665058b06c3c263f3de701d0eefd812f46" in content
+    assert "docker_image_id=sha256:3e1348c530a823e886a9f68b7e2b44665058b06c3c263f3de701d0eefd812f46" in content
 
 
 def test_postgresql_rehearsal_image_includes_fake_worker_protocol_client():
