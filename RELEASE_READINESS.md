@@ -1,6 +1,16 @@
-# ScanLattice v1.0 Release Readiness
+# ScanLattice v1.0 Release Readiness (historical audit)
 
-**Status: not production-ready.** This audit verifies local application behavior and a frozen v0.4 migration fixture. Docker staging, an operator database restore, live provider synchronization, and production deployment were not performed.
+> This file records an earlier v1.0 audit. It predates the PostgreSQL v2
+> disposable Compose rehearsals and is not the current v2 release status. See
+> [the v2 Debian staging runbook](deploy/DEBIAN_V2_STAGING_RUNBOOK.md),
+> [the guarded production import procedure](deploy/PRODUCTION_IMPORT.md), and
+> [the v2 cutover checklist](V2_PRODUCTION_CUTOVER_CHECKLIST.md). Production
+> remains **not approved** until the listed manual gates are completed.
+
+**Historical status:** not production-ready. The original audit verified local
+application behavior and a frozen v0.4 migration fixture. Docker staging, an
+operator database restore, live provider synchronization, and production
+deployment had not been performed at that time.
 
 ## Verified working features
 

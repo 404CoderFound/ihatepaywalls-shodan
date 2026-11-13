@@ -36,6 +36,7 @@ def test_debian_staging_compose_is_loopback_only_internal_and_persistent():
     assert '127.0.0.1:8081:8080' in content
     assert 'internal: true' in content
     assert 'com.docker.network.bridge.enable_ip_masquerade: "false"' in content
+    assert 'com.docker.network.bridge.name: "slv2stage0"' in content
     assert 'networks: [staging_private, staging_loopback]' in content
     assert '/var/lib/postgresql/data' in content
     assert 'POSTGRES_PASSWORD_FILE: /run/secrets/db_password' in content
@@ -56,3 +57,8 @@ def test_staging_image_lock_pins_reviewed_amd64_build():
     assert "platform=linux/amd64" in content
     assert "platform_manifest=sha256:c747ee2b4f266fdf22040bc202c7711ce155ea7bff60ab7e5345a9dcd9f44d4b" in content
     assert "docker_image_id=sha256:d3351b3b7a5a14254cc0a06a4f9a5cdec00bf8772845306f9b3bdf7edc956678" in content
+
+
+def test_postgresql_rehearsal_image_includes_fake_worker_protocol_client():
+    dockerfile = Path(__file__).parents[1] / "Dockerfile.rehearsal"
+    assert "COPY worker /srv/worker" in dockerfile.read_text(encoding="utf-8")

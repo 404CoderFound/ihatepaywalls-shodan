@@ -1,5 +1,12 @@
 # ScanLattice v1.0
 
+> **v2 release-candidate status (2026-11-13):** PostgreSQL compatibility,
+> guarded SQLite snapshot migration, isolated Debian staging and local Docker
+> backup/restore/fake-worker rehearsal are under review on a feature branch.
+> Production has not been changed and is not approved for cutover. Follow
+> [V2_RELEASE_RUNBOOK.md](V2_RELEASE_RUNBOOK.md) for the tested local flow and
+> remaining manual gates.
+
 Open-source network intelligence index with a passive-only FastAPI control plane and separate authorized scanning workers. The interface follows the compact, utilitarian search style of the mid-2010s without using Shodan code or assets.
 
 Public visitors can search indexed observations and cached/passive intelligence without authentication. Public search may queue bounded enrichment through explicitly enabled passive providers, but it never launches an active scan or contacts a target application's services. Active jobs, worker management, dataset imports, provider configuration, monitoring management and vulnerability feed refresh require server-side administrator authorization. Browser administrators use an HttpOnly, SameSite=Strict session cookie plus a CSRF token; automation uses the `X-Admin-Token` header. The API key system is read-only and scope limited.
@@ -7,6 +14,9 @@ Public visitors can search indexed observations and cached/passive intelligence 
 ## Safety boundary
 
 The web image contains only `app/`; it has no scanner code and never contacts target application services. It may contact explicitly approved intelligence-provider APIs. The worker image contains `worker/` and accepts jobs only when both the control server and worker confirm that the target is inside the job's explicit authorization. Limits default to 4,096 addresses per ordinary job, 256 addresses per Deep Recon batch, 65,536 addresses per authorized campaign, 100 ports, bounded timeouts and rates, three lease attempts, TCP connect only, and no authentication, exploitation, stealth, or shell execution.
+
+Administrators can persist CIDR scan exclusions for opt-outs and sensitive networks. Exclusions override authorizations, cancel matching queued/leased jobs, and block future claims and result submissions. Disabling an exclusion does not revive cancelled jobs. This active-scan control does not delete or hide previously indexed observations. A worker may finish the small bounded batch already in progress; for an immediate stop, pause that authorized worker before adding the exclusion.
+
 
 ## Layout
 

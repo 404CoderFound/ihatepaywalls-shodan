@@ -42,7 +42,7 @@ class SQLiteBackend:
 
 
 _GENERATED_ID_TABLES = {
-    "observations", "services", "authorizations", "scan_profiles", "audit_logs",
+    "observations", "services", "authorizations", "scan_exclusions", "scan_profiles", "audit_logs",
     "passive_providers", "passive_records", "hostnames", "routing_prefixes",
     "indexing_schedules", "api_keys", "dns_observations", "host_vulnerability_matches",
     "host_screenshots", "monitor_targets", "monitor_events", "monitor_destinations",

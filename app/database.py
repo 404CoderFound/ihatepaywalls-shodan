@@ -128,6 +128,12 @@ def init_db(seed_demo: bool = False) -> None:
           id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, cidr TEXT NOT NULL UNIQUE,
           enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, created_by TEXT NOT NULL DEFAULT 'admin'
         );
+        CREATE TABLE IF NOT EXISTS scan_exclusions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, cidr TEXT NOT NULL UNIQUE,
+          reason TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL, created_by TEXT NOT NULL DEFAULT 'admin'
+        );
+        CREATE INDEX IF NOT EXISTS idx_scan_exclusions_enabled ON scan_exclusions(enabled,cidr);
         CREATE TABLE IF NOT EXISTS scan_profiles (
           id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, ports TEXT NOT NULL,
           connect_timeout REAL NOT NULL DEFAULT 3, banner_timeout REAL NOT NULL DEFAULT 3,
