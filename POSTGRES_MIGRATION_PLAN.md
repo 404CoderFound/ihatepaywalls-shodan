@@ -1,6 +1,8 @@
-# PostgreSQL Migration Design (Plan Only)
+# PostgreSQL Migration Design and Implementation Status
 
-**Status:** design draft; no PostgreSQL code, migration, benchmark, or database connection is included in this branch. Begin implementation only after CI is runnable and isolated Docker staging passes. The current application remains SQLite-only.
+**Status (2026-11-13):** PostgreSQL has an implemented psycopg compatibility backend, ordered schema migrations, isolated Docker staging, resumable copy-only import, a separate guarded frozen-snapshot importer, reconciliation, and local restore/fake-worker rehearsals. SQLite remains supported and the standard unit-test backend. This remains **not approved for production**: no live cutover, reverse migration after PostgreSQL writes, operator-managed final backup, production PostgreSQL startup, traffic switch, or AWS worker reconnection has occurred. Run local tests only; paid GitHub Actions are not required.
+
+The compatibility schema retains the current logical schema and text-based IP/payload fields so v1 API and worker contracts can be exercised without changing their representations. Native `INET`/`CIDR`, `JSONB`, query-plan tuning, and workload benchmarks remain follow-up work. Scan exclusions are stored in both SQLite and PostgreSQL and override positive scan authorizations.
 
 ## Goals and invariants
 
@@ -26,7 +28,7 @@ Use versioned PostgreSQL migrations and repository interfaces, with explicit Pos
 | `scan_jobs` | stable v1 job ID, authorization/profile refs, target, port set, worker/lease/result state | retain v1 IDs and state semantics; claim index; idempotent result key unique |
 | `authorizations`, `profiles`, `exclusions`, `opt_outs`, `audit_events` | normalized control-plane records and immutable audit trail | CIDR lookup, enabled-state indexes, append-only audit ordering |
 
-`services` represents the latest known service index; `observations` is the historical evidence log. A certificate or banner can be shared across many observations without losing per-host provenance. Preserve the existing `hosts`, `services`, `observations`, worker, authorization, and job fields through a documented mapping before implementing the new schema.
+`services` represents the latest known service index; `observations` is the historical evidence log. A certificate or banner can be shared across many observations without losing per-host provenance. The implemented compatibility schema preserves current SQLite logical tables through ordered migrations. The proposed native IP/JSON redesign in this section is future work, not part of the current release candidate.
 
 ## Ingestion, idempotency, and backpressure
 
@@ -57,14 +59,14 @@ All steps use a disposable copy of a sanitized SQLite database, never a producti
 
 Create deterministic synthetic datasets with documented generator seed and distributions at 100k, 1m, and (if staging resources permit) 10m observations. Include IPv4/IPv6, common/rare ports, ASN skew, duplicate banners/certificates, and historical rows. Run on declared CPU/RAM/disk and PostgreSQL settings; warm and cold cache separately. Measure rows/sec and MB/sec for imports, WAL/DB growth, duplicate conflict cost, queue lag under producer backpressure, and p50/p95/p99 for exact IP, CIDR, ASN, service/port, hostname, history, facets, and paginated queries. Compare SQLite and PostgreSQL on identical inputs and query semantics; save raw results and `EXPLAIN (ANALYZE, BUFFERS)` plans. Do not claim a speedup without repeatable measurements.
 
-## Implementation milestones
+## Future design milestones (not current implementation status)
 
-1. Schema/mapping inventory and SQLite compatibility contract; add backend-neutral repository tests without changing runtime behavior.
-2. PostgreSQL migrations/models and repository implementation; run the unchanged test suite against both backends in CI.
-3. Streaming resumable importer with batch idempotency, reconciliation reports, dedupe tests, and bounded backpressure.
-4. PostgreSQL isolated Compose profile, worker/API contract E2E, interruption/resume and rollback rehearsal; gate merge on Docker CI.
-5. Benchmark and tune indexes/query plans, publish reproducible measurements and storage sizing guidance.
-6. Maintain SQLite as supported. Any production adoption remains a separate user-approved operation with no automatic deployment or data migration.
+1. Complete a schema/mapping inventory and backend-neutral query parity review for any future native-type redesign.
+2. Consider native PostgreSQL types only after production-size local performance and compatibility benchmarks.
+3. Benchmark indexing/search and query plans using synthetic data without production records.
+4. Develop and validate a lossless PostgreSQL-to-SQLite reverse migration before any write-enabled production cutover.
+5. Publish capacity guidance from repeatable workload measurements.
+6. Maintain SQLite as supported. Any production adoption remains a separately approved operation.
 
 ## Exit criteria
 

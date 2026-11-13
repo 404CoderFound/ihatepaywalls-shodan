@@ -2,6 +2,8 @@
 
 Status records what is implemented in this checkout, not parity with a commercial global search service.
 
+**Current v2 release-candidate status (2026-11-13):** The local full pytest suite passed (165 passed, 1 skipped) and the disposable Debian staging Compose smoke passed. The synthetic PostgreSQL migration/fake-worker rehearsal passed, including 41-table reconciliation, idempotence, scan history, lost-ack batch replay, retry, and empty-target restore verification. No deployment, Actions/paid CI, production database start, server mutation, traffic cutover, or external scan was performed. See [V2_RELEASE_RUNBOOK.md](V2_RELEASE_RUNBOOK.md), [the staging runbook](deploy/DEBIAN_V2_STAGING_RUNBOOK.md), and [the cutover checklist](V2_PRODUCTION_CUTOVER_CHECKLIST.md).
+
 | Area | Status |
 |---|---|
 | Existing v0.4 schema/API/worker compatibility | Additive tables and route compatibility retained; migration tests use disposable DBs; full restored-production DB migration not tested |
@@ -15,7 +17,7 @@ Status records what is implemented in this checkout, not parity with a commercia
 | Maps/trends/reports | Interactive offline choropleth using bundled Natural Earth 1:110m boundaries and real indexed country counts; country click-through, hover counts, actual observation-date trends, other aggregates and source-aware CSV export implemented |
 | Saved searches | Admin saved-search storage API implemented; edit/delete/user ownership and UI remain incomplete |
 | Python SDK/CLI | Dependency-free search/host/history/vulnerability/analytics client, resumable dataset upload and CLI implemented; `/api/docs` includes generated route inventory with public/admin/worker authorization classification; administrator operations beyond dataset ingestion remain REST-only |
-| Separate authorized scanning workers | Web image remains scanner-free; worker enforces returned authorization CIDR; admin Scan Now is shown only when an admin-only server check confirms the target is currently within an enabled allowlist; job creation rechecks authorization; no new scan protocols in this work |
+| Separate authorized scanning workers | Web image remains scanner-free; workers only receive authenticated leased jobs within enabled authorization; admin-created persistent CIDR exclusions override authorizations, cancel matching queued/leased work, and are rechecked at lease/result boundaries; active exclusions are visible and auditable in Admin |
 | Browser sections | Data-backed domains/network/maps/trends/CVE/monitor/reports/account/API views; provider toggles and resumable dataset upload in Admin; Images is an admin-only library for manually captured PNG/JPEG assets attached to indexed hosts inside an enabled authorization; access is revoked from the library if that authorization is disabled |
 | Public API rate limiting | Applied across public `/api/*` reads; tested |
 | Production-like staging restore / operator dataset | Isolated Compose file added; restore not run because no operator-provided database copy is available |
@@ -26,9 +28,9 @@ Status records what is implemented in this checkout, not parity with a commercia
 
 | Feature | Status |
 |---|---|
-| Database backend seam | `DatabaseBackend`/`ConnectionProtocol` with SQLite implementation is active by default; other backend names fail explicitly. Existing `connection()` call sites and SQLite files are preserved. SQL/migrations are still SQLite-specific; PostgreSQL is not yet supported. |
+| Database backend | SQLite remains the default; PostgreSQL now has a psycopg compatibility backend, versioned schema bootstrap, isolated staging Compose profile, guarded frozen-snapshot importer, sequence reconciliation, and local disposable PostgreSQL backup/restore/API/fake-worker rehearsals. No paid CI or production validation was run; production parity, reverse migration after PostgreSQL writes, and native INET/JSONB tuning remain incomplete. |
 | Persistent generations/tasks | Additive `scan_generations`, `scan_refresh_requests`, and `scan_tasks` tables link each bounded v2 task to a legacy `scan_jobs` row. Request/task idempotency keys and state/status APIs are implemented. |
-| Bounded query planning | Admin refresh supports normalized IP, CIDR, ASN and optional port filters. CIDR/ASN select already-indexed hosts only; configured host and host/port caps apply; enabled authorizations filter tasks. Revocation cancels queued/running jobs, and claim/start recheck authorization. No prefix expansion or public-search refresh side effect. |
+| Bounded query planning | Admin refresh supports normalized IP, CIDR, ASN and optional port filters. CIDR/ASN select already-indexed hosts only; configured host and host/port caps apply; enabled authorizations and active exclusions filter tasks. Revocation/exclusion cancels queued/running jobs, and claim/start/results recheck policy. No prefix expansion or public-search refresh side effect. |
 | Worker leases/retries | Existing v1 claim/start/progress/results API remains the execution path. V2 task state mirrors the v1 job lease; lost workers and task failures retry with delay up to the existing job attempt limit. Existing v1 failure behavior is unchanged. |
 | Admin scheduler panel | Admin-only refresh submission, idempotency retry, request/generation counters, task state, generation cancellation and authorization status are available in the Administration view and protected API. |
 | V2 tests | Deduplication, public-search separation, session+CSRF submissions, ASN normalization, CIDR limits, authorization revocation, lease expiry/retry, failure retry, cancellation, backend seam, UI references, and existing v1 APIs are covered. |
@@ -47,4 +49,4 @@ Status records what is implemented in this checkout, not parity with a commercia
 
 - Full suite: 69 passed, 1 skipped, 3 framework/client warnings. The skipped test remains the opt-in live RIPEstat integration; no provider calls were made.
 - v2 scheduler regression tests cover the new DB tables and APIs while all v1 tests continue to pass.
-- PostgreSQL, Docker, and production database migration were not performed. See `V2_INDEX_SCHEDULER.md` for compatibility and rollback instructions.
+- PostgreSQL Docker staging and production database migration were not performed. PostgreSQL support is under development; see `POSTGRES_MIGRATION_PLAN.md` for parity and rollout gates.

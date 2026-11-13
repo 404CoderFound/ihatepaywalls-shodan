@@ -19,13 +19,34 @@ from .enrichment import enrichment_target, ensure_enrichment, queue_job, recover
 from .rate_limit import FixedWindowLimiter
 from .intelligence import MAX_IMPORT_BYTES, MAX_IMPORT_CHUNK, router as intelligence_router
 from .monitoring import create_event, start_scheduler as start_monitoring_scheduler
+from .result_batches import BatchFinish, accept_batch, finish_batches
 from .index_scheduler import (
     create_refresh_request, get_refresh_request, list_generations, list_refresh_requests,
     list_tasks, sync_generation_states,
 )
 
 ROOT=Path(__file__).resolve().parent
-ADMIN_TOKEN=os.getenv("ADMIN_TOKEN",""); ENROLLMENT_TOKEN=os.getenv("ENROLLMENT_TOKEN","")
+def _configured_secret(name: str) -> str:
+    value=os.getenv(name, "")
+    file_path=os.getenv(f"{name}_FILE", "")
+    if value and file_path:
+        raise RuntimeError(f"Configure only one of {name} or {name}_FILE")
+    if not file_path:
+        return value
+    path=Path(file_path)
+    try:
+        info=path.stat()
+        if not path.is_file() or (info.st_mode & 0o777) not in {0o400, 0o440, 0o600}:
+            raise RuntimeError(f"{name}_FILE must be a regular file with mode 0400, 0440, or 0600")
+        value=path.read_text(encoding="utf-8").rstrip("\r\n")
+    except OSError as exc:
+        raise RuntimeError(f"Unable to read configured {name}_FILE") from exc
+    if not value:
+        raise RuntimeError(f"Configured {name}_FILE is empty")
+    return value
+
+ADMIN_TOKEN=_configured_secret("ADMIN_TOKEN"); ENROLLMENT_TOKEN=_configured_secret("ENROLLMENT_TOKEN")
+ACTIVE_SCANNING_ENABLED=os.getenv("ACTIVE_SCANNING_ENABLED","true").lower() in {"1","true","yes"}
 SEED_DEMO=os.getenv("SEED_DEMO","false").lower()=="true"
 OFFLINE=int(os.getenv("WORKER_OFFLINE_SECONDS","45")); LEASE=int(os.getenv("JOB_LEASE_SECONDS","90"))
 MAX_TARGETS=int(os.getenv("MAX_JOB_TARGETS","4096")); MAX_PORTS=int(os.getenv("MAX_JOB_PORTS","100"))
@@ -45,6 +66,15 @@ app.mount("/static",StaticFiles(directory=ROOT/"static"),name="static")
 
 @app.middleware("http")
 async def bounded(request:Request,call_next):
+    if not ACTIVE_SCANNING_ENABLED:
+        path=request.url.path
+        worker_api=path.startswith("/api/worker/")
+        job_creation=(request.method=="POST" and path in {
+            "/api/admin/jobs", "/api/admin/refresh-requests", "/api/admin/deep-recon/launch",
+            "/api/admin/vulnerabilities/refresh", "/api/admin/monitor/run-once",
+        })
+        if worker_api or job_creation:
+            return JSONResponse({"detail":"Active scanning and probe execution are disabled"},503)
     screenshot_path=request.url.path.startswith("/api/admin/hosts/") and request.url.path.endswith("/screenshots")
     body_limit=int(os.getenv("MAX_IMPORT_CHUNK_BYTES",str(8*1024*1024))) if request.url.path=="/api/admin/datasets/imports" else MAX_SCREENSHOT_BYTES if screenshot_path else int(os.getenv("MAX_BODY_BYTES",str(2*1024*1024)))
     if int(request.headers.get("content-length","0"))>body_limit:
@@ -120,7 +150,7 @@ def startup():
 @app.get("/")
 def home():return FileResponse(ROOT/"static"/"index.html")
 @app.get("/api/health")
-def health():return {"status":"ok","role":"control-plane","active_scanning":False,"passive_enrichment":ENRICHMENT_ENABLED,"host_page_size":10,"version":"1.0.0"}
+def health():return {"status":"ok","role":"control-plane","active_scanning":ACTIVE_SCANNING_ENABLED,"passive_enrichment":ENRICHMENT_ENABLED,"host_page_size":10,"version":"1.0.0"}
 @app.get("/api/stats")
 def stats():
     with connection() as db:return {"observations":db.execute("SELECT COUNT(*) FROM observations").fetchone()[0],"services":db.execute("SELECT COUNT(*) FROM services").fetchone()[0],"hosts":db.execute("SELECT COUNT(*) FROM (SELECT ip FROM hosts UNION SELECT ip FROM passive_records WHERE ip!='')").fetchone()[0],"passive_records":db.execute("SELECT COUNT(*) FROM passive_records").fetchone()[0],"workers_online":db.execute("SELECT COUNT(*) FROM workers WHERE last_seen>?",(int(time.time())-OFFLINE,)).fetchone()[0],"demo_enabled":SEED_DEMO}
@@ -193,7 +223,7 @@ def docs():return {
     "endpoints":{
         "public_read":["GET /api/search","GET /api/hosts/{ip}","GET /api/hosts/{ip}/observations","GET /api/domains/{domain}","GET /api/stats","GET /api/enrichment/{id}","GET /api/analytics/summary","GET /api/reports/export.csv","GET /api/vulnerabilities","GET /api/vulnerabilities/stats","GET /api/vulnerabilities/{cve}"],
         "admin_session":["POST /api/admin/session","GET /api/admin/session","POST /api/admin/session/logout"],
-        "admin_control":["GET/POST /api/admin/authorizations","GET /api/admin/hosts/{ip}/authorization","POST /api/admin/hosts/{ip}/screenshots","GET /api/admin/screenshots","GET /api/admin/screenshots/{id}/content","GET/POST /api/admin/jobs","POST /api/admin/jobs/{id}/cancel","GET/POST /api/admin/refresh-requests","GET /api/admin/refresh-requests/{id}","GET /api/admin/scan-generations","GET /api/admin/scan-tasks","POST /api/admin/scan-generations/{id}/cancel","GET /api/admin/workers","POST /api/admin/passive/providers","PUT /api/admin/passive/providers/{id}","POST /api/admin/datasets/imports (Content-Range chunk upload)","POST /api/admin/datasets/imports/{id}/resume","POST /api/admin/vulnerabilities/refresh","GET /api/admin/vulnerabilities/providers","GET/POST /api/admin/monitor/targets","GET/POST /api/admin/monitor/destinations","POST /api/admin/monitor/run-once","GET /api/admin/monitor/events","GET /api/admin/monitor/notifications","POST /api/admin/monitor/notifications/{id}/retry","POST /api/admin/monitor/events/{id}/acknowledge","GET/POST /api/admin/api-keys","GET/POST /api/admin/saved-searches"],
+        "admin_control":["GET/POST /api/admin/authorizations","GET/POST /api/admin/scan-exclusions","POST /api/admin/scan-exclusions/{id}/disable","GET /api/admin/hosts/{ip}/authorization","POST /api/admin/hosts/{ip}/screenshots","GET /api/admin/screenshots","GET /api/admin/screenshots/{id}/content","GET/POST /api/admin/jobs","POST /api/admin/jobs/{id}/cancel","GET/POST /api/admin/refresh-requests","GET /api/admin/refresh-requests/{id}","GET /api/admin/scan-generations","GET /api/admin/scan-tasks","POST /api/admin/scan-generations/{id}/cancel","GET /api/admin/workers","POST /api/admin/passive/providers","PUT /api/admin/passive/providers/{id}","POST /api/admin/datasets/imports (Content-Range chunk upload)","POST /api/admin/datasets/imports/{id}/resume","POST /api/admin/vulnerabilities/refresh","GET /api/admin/vulnerabilities/providers","GET/POST /api/admin/monitor/targets","GET/POST /api/admin/monitor/destinations","POST /api/admin/monitor/run-once","GET /api/admin/monitor/events","GET /api/admin/monitor/notifications","POST /api/admin/monitor/notifications/{id}/retry","POST /api/admin/monitor/events/{id}/acknowledge","GET/POST /api/admin/api-keys","GET/POST /api/admin/saved-searches"],
         "worker":["POST /api/worker/register","POST /api/worker/heartbeat","GET /api/worker/jobs/next","POST /api/worker/jobs/{id}/results"]
     },
     "dataset_import":{"formats":["CSV","JSON array or object","JSONL"],"encoding":["identity","gzip"],"maximum_bytes":MAX_IMPORT_BYTES,"maximum_chunk_bytes":MAX_IMPORT_CHUNK,"resume":"Reuse the import id and continue at the returned byte offset; failed parsing can be retried with POST /api/admin/datasets/imports/{id}/resume"}
@@ -236,8 +266,42 @@ def register(p:Registration,x_enrollment_token:Annotated[str|None,Header()]=None
 class Heartbeat(BaseModel):
     cpu_pct:float=Field(ge=0,le=100);memory_pct:float=Field(ge=0,le=100);active_jobs:int=Field(default=0,ge=0,le=100);version:str=Field(default="",max_length=40);capabilities:list[str]|None=None;max_concurrent:int|None=Field(default=None,ge=1,le=16)
 
+def _scan_exclusion_overlaps(db, target: ipaddress._BaseNetwork):
+    for row in db.execute("SELECT * FROM scan_exclusions WHERE enabled=1"):
+        try:
+            excluded = ipaddress.ip_network(row["cidr"], strict=False)
+        except ValueError:
+            # A malformed legacy record must fail closed for the target family.
+            return row
+        if excluded.version == target.version and excluded.overlaps(target):
+            return row
+    return None
+
+
+def _cancel_excluded_jobs(db) -> int:
+    cancelled = 0
+    now = utc_now()
+    rows = db.execute("SELECT id,target FROM scan_jobs WHERE status IN ('queued','assigned','running')").fetchall()
+    for job in rows:
+        try:
+            target = ipaddress.ip_network(job["target"], strict=False)
+        except ValueError:
+            continue
+        exclusion = _scan_exclusion_overlaps(db, target)
+        if exclusion is None:
+            continue
+        db.execute("UPDATE scan_jobs SET status='cancelled',error='Target covered by scan exclusion',lease_token=NULL,lease_expires_at=NULL,updated_at=?,completed_at=? WHERE id=?", (now, now, job["id"]))
+        db.execute("UPDATE scan_tasks SET status='cancelled',error='Target covered by scan exclusion',lease_owner='',lease_token='',lease_expires_at=NULL,updated_at=? WHERE scan_job_id=? AND status IN ('queued','leased','running')", (now, job["id"]))
+        audit(db, "scan_exclusion.job_cancelled", {"job_id": job["id"], "exclusion_id": exclusion["id"]})
+        cancelled += 1
+    if cancelled:
+        sync_generation_states(db)
+    return cancelled
+
+
 def schedule(db):
     now=int(time.time())
+    _cancel_excluded_jobs(db)
     revoked=db.execute("SELECT j.id FROM scan_jobs j JOIN authorizations a ON a.id=j.authorization_id WHERE a.enabled=0 AND j.status IN ('queued','assigned','running')").fetchall()
     for row in revoked:
         db.execute("UPDATE scan_jobs SET status='cancelled',error='Target authorization revoked',lease_token=NULL,lease_expires_at=NULL,updated_at=?,completed_at=? WHERE id=?",(utc_now(),utc_now(),row["id"]))
@@ -290,6 +354,8 @@ class LeaseAction(BaseModel):
 def leased(db,jid,wid,token):
     j=db.execute("SELECT * FROM scan_jobs WHERE id=? AND assigned_worker_id=? AND lease_token=?",(jid,wid,token)).fetchone()
     if j is None or j["status"] in {"cancelled","completed","failed"} or (j["lease_expires_at"] or 0)<int(time.time()):raise HTTPException(409,"Job lease is invalid or expired")
+    if _scan_exclusion_overlaps(db, ipaddress.ip_network(j["target"], strict=False)):
+        raise HTTPException(409,"Job target is covered by a scan exclusion")
     return j
 @app.post("/api/worker/jobs/{jid}/start")
 def start(jid:str,p:LeaseAction,x_worker_token:Annotated[str|None,Header()]=None):
@@ -305,6 +371,12 @@ def progress(jid:str,p:LeaseAction,x_worker_token:Annotated[str|None,Header()]=N
 
 class Observation(BaseModel):
     ip:str;port:int=Field(ge=1,le=65535);proto:str=Field(default="tcp",pattern="^(tcp|udp)$");hostname:str=Field(default="",max_length=253);asn:str=Field(default="",max_length=40);org:str=Field(default="",max_length=160);country:str=Field(default="",max_length=8);service:str=Field(default="",max_length=80);product:str=Field(default="",max_length=160);banner:str=Field(default="",max_length=8192);source:str=Field(default="manual",max_length=200);http:dict[str,Any]=Field(default_factory=dict);tls:dict[str,Any]=Field(default_factory=dict);ssh_id:str=Field(default="",max_length=500);latency_ms:float|None=Field(default=None,ge=0,le=120000);observed_at:str=Field(default="",max_length=64);cpe:str=Field(default="",max_length=500);os_name:str=Field(default="",max_length=160)
+class BatchUpload(BaseModel):
+    lease_token:str=Field(min_length=10,max_length=200)
+    batch_index:int=Field(ge=0,le=1000000)
+    checks_done:int=Field(ge=1)
+    observations:list[Observation]=Field(default_factory=list,max_length=64)
+
 class Results(BaseModel):
     lease_token:str;idempotency_key:str=Field(min_length=8,max_length=200);observations:list[Observation]=Field(default_factory=list,max_length=10000);completed_checks:int|None=Field(default=None,ge=0)
 
@@ -401,6 +473,83 @@ def store(db,rows:list[Observation],source:str,jid=None,wid=None):
         if r.hostname:db.execute("INSERT INTO hostnames(ip,hostname,source,first_seen,last_seen) VALUES(?,?,?,?,?) ON CONFLICT(ip,hostname,source) DO UPDATE SET last_seen=excluded.last_seen",(r.ip,r.hostname.lower(),source,now,now))
     return len(rows)
 
+
+def _notify_missing_batch_services(db, job):
+    """Mirror v1 service-disappeared monitoring after a complete batched scan."""
+    target = ipaddress.ip_network(job["target"], strict=False)
+    ports = json.loads(job["ports"])
+    start = f"{int(target.network_address):032x}"
+    end = f"{int(target.broadcast_address):032x}"
+    placeholders = ",".join("?" for _ in ports)
+    prior_services = db.execute(
+        f"SELECT s.host_ip,s.port,s.proto,s.service,s.product,s.last_seen "
+        f"FROM services s JOIN hosts h ON h.ip=s.host_ip "
+        f"WHERE h.ip_version=? AND h.ip_hex BETWEEN ? AND ? AND s.port IN ({placeholders})",
+        [target.version, start, end, *ports],
+    ).fetchall()
+    seen = {(row["ip"], row["port"], row["proto"]) for row in db.execute(
+        "SELECT DISTINCT ip,port,proto FROM observations WHERE scan_job_id=?", (job["id"],),
+    ).fetchall()}
+    monitors = [dict(row) for row in db.execute("SELECT * FROM monitor_targets WHERE enabled=1")]
+    for service in prior_services:
+        if (service["host_ip"], service["port"], service["proto"]) in seen:
+            continue
+        details = {"port": service["port"], "protocol": service["proto"],
+                   "service": service["service"], "product": service["product"],
+                   "last_observed_at": service["last_seen"], "scan_job_id": job["id"]}
+        for monitor in monitors:
+            if service["port"] in ports and ipaddress.ip_address(service["host_ip"]) in ipaddress.ip_network(monitor["target"], strict=False):
+                create_event(db, monitor, service["host_ip"], "service_disappeared",
+                             details, "active-scan", utc_now())
+
+
+
+@app.get("/api/worker/jobs/{jid}/results/batches/status")
+def result_batch_status(jid: str, x_worker_token: Annotated[str | None, Header()] = None):
+    with connection() as db:
+        w = worker(db, x_worker_token)
+        job = db.execute("SELECT * FROM scan_jobs WHERE id=? AND assigned_worker_id=?", (jid, w["id"])).fetchone()
+        if not job or job["status"] != "running" or (job["lease_expires_at"] or 0) < int(time.time()):
+            raise HTTPException(409, "Job lease is invalid or expired")
+        if not db.execute("SELECT 1 FROM authorizations WHERE id=? AND enabled=1",
+                          (job["authorization_id"],)).fetchone():
+            raise HTTPException(409, "Target authorization was revoked")
+        state = db.execute("SELECT COUNT(*) AS batch_count,COALESCE(MAX(checks_done),0) AS checks_done "
+                           "FROM scan_result_batches WHERE job_id=?", (jid,)).fetchone()
+        db.execute("UPDATE workers SET last_seen=? WHERE id=?", (int(time.time()), w["id"]))
+    return {"status": "running", "batch_count": state["batch_count"],
+            "checks_done": state["checks_done"], "progress_total": job["progress_total"]}
+
+
+@app.post("/api/worker/jobs/{jid}/results/batches")
+def upload_result_batch(jid: str, p: BatchUpload, x_worker_token: Annotated[str | None, Header()] = None):
+    with connection() as db:
+        w = worker(db, x_worker_token)
+        j = leased(db, jid, w["id"], p.lease_token)
+        # Pydantic validates the same Observation schema as the v1 result route.
+        result = accept_batch(db, j, w["id"], p.batch_index, p.checks_done, p.observations, store, LEASE)
+        sync_generation_states(db)
+    return result
+
+
+@app.post("/api/worker/jobs/{jid}/results/complete")
+def complete_result_batches(jid: str, p: BatchFinish, x_worker_token: Annotated[str | None, Header()] = None):
+    with connection() as db:
+        w = worker(db, x_worker_token)
+        j = db.execute("SELECT * FROM scan_jobs WHERE id=? AND assigned_worker_id=?", (jid, w["id"])).fetchone()
+        if j is None:
+            raise HTTPException(409, "Job is not assigned to this worker")
+        if j["status"] != "completed":
+            j = leased(db, jid, w["id"], p.lease_token)
+            if not db.execute("SELECT 1 FROM authorizations WHERE id=? AND enabled=1",
+                              (j["authorization_id"],)).fetchone():
+                raise HTTPException(409, "Target authorization was revoked")
+        result = finish_batches(db, j, w["id"], p.batch_count, p.completed_checks,
+                                _notify_missing_batch_services)
+        sync_generation_states(db)
+    return result
+
+
 @app.post("/api/worker/jobs/{jid}/results")
 def results(jid:str,p:Results,x_worker_token:Annotated[str|None,Header()]=None):
     with connection() as db:
@@ -410,6 +559,8 @@ def results(jid:str,p:Results,x_worker_token:Annotated[str|None,Header()]=None):
         if not auth:raise HTTPException(409,"Target authorization was revoked")
         target=ipaddress.ip_network(j["target"]);allowed=ipaddress.ip_network(auth[0]);ports=json.loads(j["ports"])
         if any(ipaddress.ip_address(r.ip) not in target or ipaddress.ip_address(r.ip) not in allowed or r.port not in ports for r in p.observations):raise HTTPException(400,"Result outside authorized job scope")
+        if db.execute("SELECT 1 FROM scan_result_batches WHERE job_id=?", (jid,)).fetchone():
+            raise HTTPException(409, "This job already uses batched result uploads")
         count=store(db,p.observations,"active-scan",jid,w["id"])
         if p.completed_checks is not None and p.completed_checks==j["progress_total"]:
             start=f"{int(target.network_address):032x}";end=f"{int(target.broadcast_address):032x}"
@@ -428,10 +579,12 @@ def results(jid:str,p:Results,x_worker_token:Annotated[str|None,Header()]=None):
 def fail(jid:str,p:LeaseAction,x_worker_token:Annotated[str|None,Header()]=None):
     with connection() as db:
         w=worker(db,x_worker_token);j=leased(db,jid,w["id"],p.lease_token);task=db.execute("SELECT id,attempt_count FROM scan_tasks WHERE scan_job_id=?",(jid,)).fetchone();now=int(time.time());timestamp=utc_now()
-        if task and j["attempts"]<j["max_attempts"]:
+        batched=bool(db.execute("SELECT 1 FROM scan_result_batches WHERE job_id=?",(jid,)).fetchone())
+        if (task or batched) and j["attempts"]<j["max_attempts"]:
             delay=min(300,5*(2**max(0,int(j["attempts"])-1)))
             db.execute("UPDATE scan_jobs SET status='queued',assigned_worker_id=NULL,error=?,updated_at=?,completed_at=NULL,lease_expires_at=NULL,lease_token=NULL WHERE id=?",(p.error or "Worker reported failure; retry scheduled",timestamp,jid))
-            db.execute("UPDATE scan_tasks SET available_at=?,error=?,updated_at=? WHERE id=?",(now+delay,p.error or "Worker reported failure; retry scheduled",timestamp,task["id"]))
+            if task:
+                db.execute("UPDATE scan_tasks SET available_at=?,error=?,updated_at=? WHERE id=?",(now+delay,p.error or "Worker reported failure; retry scheduled",timestamp,task["id"]))
             status="queued"
         else:
             db.execute("UPDATE scan_jobs SET status='failed',error=?,completed_at=?,updated_at=?,lease_expires_at=NULL,lease_token=NULL WHERE id=?",(p.error or "Worker reported failure",timestamp,timestamp,jid));status="failed"
@@ -548,6 +701,47 @@ def update_provider(provider_id:int,p:ProviderUpdate,x_admin_token:Annotated[str
         if row["provider_type"]=="shodan_internetdb" and p.enabled and os.getenv("SHODAN_INTERNETDB_NONCOMMERCIAL_CONSENT","false").lower() not in {"1","true","yes"}:raise HTTPException(403,"Enable SHODAN_INTERNETDB_NONCOMMERCIAL_CONSENT only after confirming applicable Shodan terms or a commercial license")
         db.execute("UPDATE passive_providers SET enabled=?,requests_per_minute=?,updated_at=? WHERE id=?",(int(p.enabled),p.requests_per_minute,utc_now(),provider_id));audit(db,"passive.provider_updated",{"provider_id":provider_id,"enabled":p.enabled,"requests_per_minute":p.requests_per_minute})
     return {"id":provider_id,"enabled":p.enabled,"requests_per_minute":p.requests_per_minute}
+
+class ScanExclusionCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    cidr: str
+    reason: str = Field(default="", max_length=500)
+
+
+@app.get("/api/admin/scan-exclusions")
+def list_scan_exclusions(x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:
+        return {"exclusions":[dict(row) for row in db.execute("SELECT * FROM scan_exclusions ORDER BY enabled DESC,id DESC")]}
+
+
+@app.post("/api/admin/scan-exclusions")
+def create_scan_exclusion(p:ScanExclusionCreate,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    try:
+        network=ipaddress.ip_network(p.cidr,strict=False)
+    except ValueError as exc:
+        raise HTTPException(400,"Invalid scan-exclusion CIDR") from exc
+    with connection() as db:
+        cidr=str(network)
+        if db.execute("SELECT 1 FROM scan_exclusions WHERE cidr=?",(cidr,)).fetchone():
+            raise HTTPException(409,"Scan exclusion already exists")
+        cur=db.execute("INSERT INTO scan_exclusions(name,cidr,reason,created_at) VALUES(?,?,?,?)",(p.name,cidr,p.reason,utc_now()))
+        cancelled=_cancel_excluded_jobs(db)
+        audit(db,"scan_exclusion.created",{"id":cur.lastrowid,"cidr":cidr,"cancelled_jobs":cancelled})
+    return {"id":cur.lastrowid,"name":p.name,"cidr":cidr,"reason":p.reason,"enabled":True,"cancelled_jobs":cancelled}
+
+
+@app.post("/api/admin/scan-exclusions/{exclusion_id}/disable")
+def disable_scan_exclusion(exclusion_id:int,x_admin_token:Annotated[str|None,Header()]=None):
+    admin(x_admin_token)
+    with connection() as db:
+        row=db.execute("SELECT id FROM scan_exclusions WHERE id=?",(exclusion_id,)).fetchone()
+        if row is None:raise HTTPException(404,"Scan exclusion not found")
+        db.execute("UPDATE scan_exclusions SET enabled=0 WHERE id=?",(exclusion_id,))
+        audit(db,"scan_exclusion.disabled",{"id":exclusion_id})
+    return {"id":exclusion_id,"enabled":False}
+
 
 class AuthCreate(BaseModel):name:str=Field(min_length=2,max_length=100);cidr:str
 @app.post("/api/admin/authorizations")
@@ -730,6 +924,7 @@ def create_job(p:JobCreate,x_admin_token:Annotated[str|None,Header()]=None):
     except ValueError as exc:raise HTTPException(400,"Target must be an IP address or CIDR") from exc
     if target.num_addresses>MAX_TARGETS:raise HTTPException(400,f"Target exceeds maximum of {MAX_TARGETS} addresses")
     with connection() as db:
+        if _scan_exclusion_overlaps(db,target):raise HTTPException(403,"Target overlaps an active scan exclusion")
         auth=next((r for r in db.execute("SELECT * FROM authorizations WHERE enabled=1") if target.subnet_of(ipaddress.ip_network(r["cidr"]))),None)
         if auth is None:raise HTTPException(403,"Target is not within an enabled authorization")
         profile=db.execute("SELECT * FROM scan_profiles WHERE id=?",(p.profile_id,)).fetchone()
@@ -755,6 +950,7 @@ def _deep_candidates(db,query:str)->tuple[str,list[str]]:
     return kind,[str(ipaddress.ip_network(row[0],strict=False)) for row in rows]
 
 def _authorization_for(db,network):
+    if _scan_exclusion_overlaps(db,network):return None
     return next((row for row in db.execute("SELECT * FROM authorizations WHERE enabled=1") if network.subnet_of(ipaddress.ip_network(row["cidr"]))),None)
 
 def _campaign_ports(profile,requested):
@@ -776,7 +972,8 @@ def deep_recon_preview(p:DeepReconPreview,x_admin_token:Annotated[str|None,Heade
         ports=_campaign_ports(profile,p.ports);kind,candidates=_deep_candidates(db,p.query);items=[]
         for value in candidates:
             network=ipaddress.ip_network(value,strict=False);authorization=_authorization_for(db,network)
-            items.append({"target":str(network),"addresses":int(network.num_addresses),"authorized":authorization is not None,"authorization":authorization["cidr"] if authorization else None,"batches":len(_split_network(network)) if authorization and network.num_addresses<=MAX_CAMPAIGN_TARGETS else 0})
+            excluded=_scan_exclusion_overlaps(db,network) is not None
+            items.append({"target":str(network),"addresses":int(network.num_addresses),"authorized":authorization is not None,"excluded":excluded,"authorization":authorization["cidr"] if authorization else None,"batches":len(_split_network(network)) if authorization and network.num_addresses<=MAX_CAMPAIGN_TARGETS else 0})
     return {"query":p.query,"query_type":kind,"profile":{"id":profile["id"],"name":profile["name"],"ports":ports,"rate_per_second":profile["rate_per_second"]},"candidates":items,"target_count":sum(item["addresses"] for item in items if item["authorized"]),"estimated_connections":sum(item["addresses"] for item in items if item["authorized"])*len(ports),"notice":"Only explicitly authorized candidates may be selected. ASN prefixes are never automatically authorized."}
 
 @app.post("/api/admin/deep-recon/launch")
@@ -792,6 +989,7 @@ def deep_recon_launch(p:DeepReconLaunch,x_admin_token:Annotated[str|None,Header(
         if total>MAX_CAMPAIGN_TARGETS:raise HTTPException(400,f"Campaign exceeds maximum of {MAX_CAMPAIGN_TARGETS} addresses")
         batches=[]
         for network in selected:
+            if _scan_exclusion_overlaps(db,network):raise HTTPException(403,f"Target {network} overlaps an active scan exclusion")
             authorization=_authorization_for(db,network)
             if authorization is None:raise HTTPException(403,f"Target {network} is outside enabled authorizations")
             batches.extend((batch,authorization) for batch in _split_network(network))
@@ -840,4 +1038,4 @@ def logs(x_admin_token:Annotated[str|None,Header()]=None):
 @app.get("/api/admin/settings")
 def settings(x_admin_token:Annotated[str|None,Header()]=None):
     admin(x_admin_token)
-    return {"active_scanning_on_control_plane":False,"max_job_targets":MAX_TARGETS,"max_job_ports":MAX_PORTS,"job_lease_seconds":LEASE,"worker_offline_seconds":OFFLINE,"database":"sqlite","configuration_source":"environment"}
+    return {"active_scanning_on_control_plane":ACTIVE_SCANNING_ENABLED,"max_job_targets":MAX_TARGETS,"max_job_ports":MAX_PORTS,"job_lease_seconds":LEASE,"worker_offline_seconds":OFFLINE,"database":os.getenv("DATABASE_BACKEND","sqlite"),"configuration_source":"environment"}

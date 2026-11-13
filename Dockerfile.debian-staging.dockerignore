@@ -1,0 +1,6 @@
+**
+!app/
+!app/**
+!migrations/
+!migrations/**
+!requirements.staging.lock

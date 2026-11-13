@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import ipaddress
 import sqlite3
+import re
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,6 +59,13 @@ def connection():
 
 
 def _columns(db: sqlite3.Connection, table: str) -> set[str]:
+    if os.getenv("DATABASE_BACKEND", "sqlite").lower() in {"postgres", "postgresql"}:
+        if not re.fullmatch(r"[a-z_][a-z0-9_]*", table):
+            raise ValueError("Invalid table name")
+        return {row[0] for row in db.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=?",
+            (table,),
+        )}
     return {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
 
 
@@ -68,12 +76,27 @@ def _add_columns(db: sqlite3.Connection, table: str, definitions: dict[str, str]
             db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
 
+def _migrate_postgresql(db) -> None:
+    """Apply ordered, transactional PostgreSQL schema migrations once."""
+    db.execute("SELECT pg_advisory_xact_lock(20261110, 1)")
+    db.execute("CREATE TABLE IF NOT EXISTS schema_migrations(version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
+    migration_dir = Path(__file__).resolve().parent.parent / "migrations" / "postgresql"
+    for migration in sorted(migration_dir.glob("*.sql")):
+        version = migration.name.split("_", 1)[0]
+        if db.execute("SELECT 1 FROM schema_migrations WHERE version=?", (version,)).fetchone():
+            continue
+        db.executescript(migration.read_text(encoding="utf-8"))
+        db.execute("INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)", (version, utc_now()))
+
+
 def init_db(seed_demo: bool = False) -> None:
     with connection() as db:
-        if os.getenv("DATABASE_BACKEND", "sqlite").lower() != "sqlite":
-            raise RuntimeError("Schema migrations are SQLite-specific until a PostgreSQL migration is implemented")
-        db.execute("PRAGMA journal_mode=WAL")
-        db.executescript("""
+        backend_name = os.getenv("DATABASE_BACKEND", "sqlite").lower()
+        if backend_name in {"postgres", "postgresql"}:
+            _migrate_postgresql(db)
+        else:
+            db.execute("PRAGMA journal_mode=WAL")
+            db.executescript("""
         CREATE TABLE IF NOT EXISTS observations (
           id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT NOT NULL, port INTEGER NOT NULL,
           proto TEXT NOT NULL DEFAULT 'tcp', asn TEXT NOT NULL DEFAULT '', org TEXT NOT NULL DEFAULT '',
@@ -105,6 +128,12 @@ def init_db(seed_demo: bool = False) -> None:
           id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, cidr TEXT NOT NULL UNIQUE,
           enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, created_by TEXT NOT NULL DEFAULT 'admin'
         );
+        CREATE TABLE IF NOT EXISTS scan_exclusions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, cidr TEXT NOT NULL UNIQUE,
+          reason TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL, created_by TEXT NOT NULL DEFAULT 'admin'
+        );
+        CREATE INDEX IF NOT EXISTS idx_scan_exclusions_enabled ON scan_exclusions(enabled,cidr);
         CREATE TABLE IF NOT EXISTS scan_profiles (
           id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, ports TEXT NOT NULL,
           connect_timeout REAL NOT NULL DEFAULT 3, banner_timeout REAL NOT NULL DEFAULT 3,
@@ -320,7 +349,7 @@ def init_db(seed_demo: bool = False) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_scan_tasks_generation ON scan_tasks(generation_id,status);
         CREATE INDEX IF NOT EXISTS idx_scan_tasks_queue ON scan_tasks(status,available_at,created_at);
-        """)
+            """)
         _add_columns(db, "observations", {
             "hostname": "TEXT NOT NULL DEFAULT ''", "service": "TEXT NOT NULL DEFAULT ''",
             "http_json": "TEXT NOT NULL DEFAULT '{}'", "tls_json": "TEXT NOT NULL DEFAULT '{}'",
@@ -342,6 +371,29 @@ def init_db(seed_demo: bool = False) -> None:
             "source": "TEXT NOT NULL DEFAULT ''", "banner": "TEXT NOT NULL DEFAULT ''",
             "http_json": "TEXT NOT NULL DEFAULT '{}'", "tls_json": "TEXT NOT NULL DEFAULT '{}'"
         })
+        if backend_name == "sqlite":
+            # v2 durable result batches are additive; legacy jobs/results remain valid.
+            db.executescript("""
+            CREATE TABLE IF NOT EXISTS scan_result_batches (
+              job_id TEXT NOT NULL REFERENCES scan_jobs(id),
+              batch_index INTEGER NOT NULL CHECK(batch_index >= 0),
+              payload_hash TEXT NOT NULL,
+              checks_done INTEGER NOT NULL CHECK(checks_done >= 1),
+              observation_count INTEGER NOT NULL CHECK(observation_count >= 0),
+              created_at TEXT NOT NULL,
+              PRIMARY KEY(job_id, batch_index)
+            );
+            CREATE TABLE IF NOT EXISTS scan_result_finishes (
+              job_id TEXT PRIMARY KEY REFERENCES scan_jobs(id),
+              worker_id TEXT NOT NULL REFERENCES workers(id),
+              batch_count INTEGER NOT NULL,
+              completed_checks INTEGER NOT NULL,
+              observation_count INTEGER NOT NULL,
+              finished_at TEXT NOT NULL
+            );
+            """)
+
+
         _add_columns(db, "observations", {"observation_hash": "TEXT NOT NULL DEFAULT ''"})
         _add_columns(db, "observations", {"cpe": "TEXT NOT NULL DEFAULT ''", "os_name": "TEXT NOT NULL DEFAULT ''"})
         _add_columns(db, "services", {"cpe": "TEXT NOT NULL DEFAULT ''"})
@@ -384,15 +436,30 @@ def init_db(seed_demo: bool = False) -> None:
             ]
             db.executemany("INSERT INTO observations(ip,port,proto,asn,org,country,product,banner,source,seen_at,is_demo,service) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", samples)
             for row in samples:
-                db.execute("INSERT OR REPLACE INTO hosts(ip,asn,org,country,first_seen,last_seen,is_demo) VALUES(?,?,?,?,?,?,1)", (row[0],row[3],row[4],row[5],now,now))
+                db.execute("""INSERT INTO hosts(ip,asn,org,country,first_seen,last_seen,is_demo)
+                  VALUES(?,?,?,?,?,?,1) ON CONFLICT(ip) DO UPDATE SET asn=excluded.asn,
+                  org=excluded.org,country=excluded.country,first_seen=excluded.first_seen,
+                  last_seen=excluded.last_seen,is_demo=excluded.is_demo""",
+                  (row[0],row[3],row[4],row[5],now,now))
         # Backfill normalized records for databases created by v0.1. The
         # append-only observations table remains the historical source.
         db.execute("""INSERT OR IGNORE INTO hosts(ip,hostname,asn,org,country,first_seen,last_seen,is_demo)
           SELECT ip,COALESCE(MAX(hostname),''),MAX(asn),MAX(org),MAX(country),MIN(seen_at),MAX(seen_at),MAX(is_demo)
           FROM observations GROUP BY ip""")
+        # Backfill service metadata from the latest observation in each group.
+        # SQLite permits bare, ungrouped columns alongside MAX(id), but
+        # PostgreSQL rejects them. Group first, then join the selected row so
+        # service and product always come from the same observation.
         db.execute("""INSERT OR IGNORE INTO services(host_ip,port,proto,service,product,first_seen,last_seen,last_observation_id)
-          SELECT o.ip,o.port,o.proto,COALESCE(o.service,''),o.product,MIN(o.seen_at),MAX(o.seen_at),MAX(o.id)
-          FROM observations o JOIN hosts h ON h.ip=o.ip GROUP BY o.ip,o.port,o.proto""")
+          SELECT latest.ip,latest.port,latest.proto,COALESCE(latest.service,''),latest.product,
+                 grouped.first_seen,grouped.last_seen,grouped.last_observation_id
+          FROM (
+            SELECT ip,port,proto,MIN(seen_at) AS first_seen,
+                   MAX(seen_at) AS last_seen,MAX(id) AS last_observation_id
+            FROM observations GROUP BY ip,port,proto
+          ) grouped
+          JOIN observations latest ON latest.id=grouped.last_observation_id
+          JOIN hosts h ON h.ip=latest.ip""")
         for row in db.execute("SELECT ip FROM hosts WHERE ip_version=0 OR ip_hex='' ").fetchall():
             import ipaddress
             address = ipaddress.ip_address(row["ip"])
@@ -403,9 +470,20 @@ def init_db(seed_demo: bool = False) -> None:
           WHERE banner=''""")
         db.execute("""INSERT OR IGNORE INTO hostnames(ip,hostname,source,first_seen,last_seen)
           SELECT ip,LOWER(hostname),source,MIN(seen_at),MAX(seen_at) FROM observations WHERE hostname!='' GROUP BY ip,LOWER(hostname),source""")
+        # GROUP BY cannot select an arbitrary organization in PostgreSQL.
+        # Aggregate the timestamps first, then read the organization from
+        # the newest source record so both databases return consistent data.
         db.execute("""INSERT OR IGNORE INTO routing_prefixes(prefix,asn,organization,source,first_seen,last_seen,expires_at)
-          SELECT network,UPPER(asn),org,source,MIN(observed_at),MAX(observed_at),MAX(expires_at)
-          FROM passive_records WHERE network!='' AND asn!='' GROUP BY network,UPPER(asn),source""")
+          SELECT grouped.network,grouped.normalized_asn,latest.org,grouped.source,
+                 grouped.first_seen,grouped.last_seen,grouped.expires_at
+          FROM (
+            SELECT network,UPPER(asn) AS normalized_asn,source,
+                   MIN(observed_at) AS first_seen,MAX(observed_at) AS last_seen,
+                   MAX(expires_at) AS expires_at,MAX(id) AS latest_record_id
+            FROM passive_records WHERE network!='' AND asn!=''
+            GROUP BY network,UPPER(asn),source
+          ) grouped
+          JOIN passive_records latest ON latest.id=grouped.latest_record_id""")
         import ipaddress
         mappings=[]
         for row in db.execute("SELECT prefix,asn,organization FROM routing_prefixes").fetchall():
@@ -416,7 +494,7 @@ def init_db(seed_demo: bool = False) -> None:
             if matches:
                 network,mapping=max(matches,key=lambda item:item[0].prefixlen)
                 db.execute("UPDATE hosts SET network_prefix=?,asn=CASE WHEN asn='' THEN ? ELSE asn END,org=CASE WHEN org='' THEN ? ELSE org END WHERE ip=?",(str(network),mapping["asn"],mapping["organization"],host["ip"]))
-        for table in ("hosts","observations","passive_records","routing_prefixes"):
-            for row in db.execute(f"SELECT rowid AS migration_rowid,asn FROM {table} WHERE asn!=''").fetchall():
+        for table, key_column in (("hosts", "ip"), ("observations", "id"), ("passive_records", "id"), ("routing_prefixes", "id")):
+            for row in db.execute(f"SELECT {key_column} AS migration_key,asn FROM {table} WHERE asn!=''").fetchall():
                 value=row["asn"].upper();number=value.removeprefix("AS")
-                if number.isdigit():db.execute(f"UPDATE {table} SET asn=? WHERE rowid=?",(f"AS{int(number)}",row["migration_rowid"]))
+                if number.isdigit():db.execute(f"UPDATE {table} SET asn=? WHERE {key_column}=?",(f"AS{int(number)}",row["migration_key"]))

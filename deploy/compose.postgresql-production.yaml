@@ -1,0 +1,39 @@
+# TEMPLATE ONLY: do not start against production without explicit approval.
+# Use a Compose project separate from 'web'. No host TCP port is published.
+# The internal bridge is intentionally isolated from the existing v1 web stack.
+services:
+  postgres:
+    image: postgres:17.11-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: scanlattice
+      POSTGRES_DB: scanlattice
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+    secrets:
+      - pg_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - postgres_private
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scanlattice -d scanlattice"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    shm_size: 256mb
+    security_opt:
+      - no-new-privileges:true
+
+secrets:
+  pg_password:
+    file: ${SCANLATTICE_PG_PASSWORD_FILE:?Supply absolute path to password file outside repo}
+
+volumes:
+  pgdata:
+    name: scanlattice_v2_postgresql_data
+
+networks:
+  postgres_private:
+    name: scanlattice_postgresql_private
+    driver: bridge
+    internal: true

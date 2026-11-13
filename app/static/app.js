@@ -249,11 +249,12 @@ $("admin-login").addEventListener("click", async () => {
 async function loadAdmin() {
   try {
     const headers = adminHeaders();
-    const [workers,jobs,authorizations,profiles,stats,providers,imports,refreshRequests,scanTasks] = await Promise.all([
+    const [workers,jobs,authorizations,profiles,stats,providers,imports,refreshRequests,scanTasks,exclusions] = await Promise.all([
       api("/api/admin/workers",{headers}), api("/api/admin/jobs",{headers}),
       api("/api/admin/authorizations",{headers}), api("/api/admin/profiles",{headers}), api("/api/stats"),
       api("/api/admin/passive/providers",{headers}),api("/api/admin/datasets/imports",{headers}),
-      api("/api/admin/refresh-requests",{headers}),api("/api/admin/scan-tasks",{headers})
+      api("/api/admin/refresh-requests",{headers}),api("/api/admin/scan-tasks",{headers}),
+      api("/api/admin/scan-exclusions",{headers})
     ]);
     $("admin-content").classList.remove("hidden");
     $("workers-online").textContent = workers.workers.filter(row => row.online).length;
@@ -265,6 +266,8 @@ async function loadAdmin() {
     $("job-worker").innerHTML = '<option value="">Automatic worker selection</option>' + workers.workers.map(row => `<option value="${row.id}">${esc(row.name)}${row.online ? "" : " (offline)"}</option>`).join("");
     $("job-worker").value = selected;
     $("auth-list").innerHTML = authorizations.authorizations.map(row => `<div><b>${esc(row.name)}</b><code>${esc(row.cidr)}</code><span>${row.enabled ? "ENABLED" : "DISABLED"}</span></div>`).join("") || "No authorized target ranges.";
+    $("exclusion-list").innerHTML = exclusions.exclusions.map(row => `<div><b>${esc(row.name)}</b><code>${esc(row.cidr)}</code><span>${row.enabled ? "BLOCKED" : "DISABLED"}</span>${row.reason?`<small>${esc(row.reason)}</small>`:""}${row.enabled?`<button class="tiny disable-exclusion" data-id="${row.id}">DISABLE</button>`:""}</div>`).join("") || "No scan exclusions configured.";
+    document.querySelectorAll(".disable-exclusion").forEach(button => button.onclick = async () => {try{await api(`/api/admin/scan-exclusions/${button.dataset.id}/disable`,{method:"POST",headers:adminHeaders()});toast("Scan exclusion disabled; cancelled jobs remain cancelled");await loadAdmin();}catch(error){toast(error.message);}});
     $("worker-table").innerHTML = workers.workers.map(row => `<tr><td>${esc(row.name)}<br><small>${row.id}</small></td><td class="${row.online ? "online" : "offline"}">${row.online ? "● Online" : "○ Offline"}</td><td>${row.cpu_pct.toFixed(1)}% / ${row.memory_pct.toFixed(1)}%</td><td>${row.running_jobs} / ${row.max_concurrent}</td><td>${row.completed_jobs}</td><td>${esc(row.version || "legacy")}<br><small>${esc(row.capabilities.join(", "))}</small></td><td>${new Date(row.last_seen*1000).toLocaleString()}</td></tr>`).join("") || '<tr><td colspan="7">No workers enrolled.</td></tr>';
     $("job-table").innerHTML = jobs.jobs.map(row => `<tr><td><small>${row.id}</small><br><b>${esc(row.target)}</b><br>${row.ports.join(", ")}</td><td>${esc(row.profile_name)}</td><td class="status-${row.status}">${esc(row.status.toUpperCase())}</td><td>${row.progress_done} / ${row.progress_total}</td><td>${esc(row.worker_name || "Unassigned")}</td><td>${esc(row.error || "")}${["queued","assigned","running"].includes(row.status) ? `<button class="tiny cancel-job" data-id="${row.id}">CANCEL</button>` : ""}</td></tr>`).join("") || '<tr><td colspan="6">No scan jobs.</td></tr>';
     document.querySelectorAll(".cancel-job").forEach(button => button.onclick = () => cancelJob(button.dataset.id));
@@ -301,6 +304,13 @@ function bindDatasetUpload(){
 $("auth-form").addEventListener("submit", async event => {
   event.preventDefault();
   try {await api("/api/admin/authorizations",{method:"POST",headers:adminHeaders(),body:JSON.stringify({name:$("auth-name").value,cidr:$("auth-cidr").value})}); event.target.reset(); toast("Target authorization created"); await loadAdmin();} catch(error){toast(error.message);}
+});
+$("exclusion-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  try {
+    await api("/api/admin/scan-exclusions",{method:"POST",headers:adminHeaders(),body:JSON.stringify({name:$("exclusion-name").value,cidr:$("exclusion-cidr").value,reason:$("exclusion-reason").value})});
+    event.target.reset();toast("Exclusion enabled; matching queued jobs were cancelled");await loadAdmin();
+  } catch(error) {toast(error.message);}
 });
 $("job-form").addEventListener("submit", async event => {
   event.preventDefault(); const ports=$("job-ports").value.trim();

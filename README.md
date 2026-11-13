@@ -1,5 +1,12 @@
 # ScanLattice v1.0
 
+> **v2 release-candidate status (2026-11-13):** PostgreSQL compatibility,
+> guarded SQLite snapshot migration, isolated Debian staging and local Docker
+> backup/restore/fake-worker rehearsal are under review on a feature branch.
+> Production has not been changed and is not approved for cutover. Follow
+> [V2_RELEASE_RUNBOOK.md](V2_RELEASE_RUNBOOK.md) for the tested local flow and
+> remaining manual gates.
+
 Open-source network intelligence index with a passive-only FastAPI control plane and separate authorized scanning workers. The interface follows the compact, utilitarian search style of the mid-2010s without using Shodan code or assets.
 
 Public visitors can search indexed observations and cached/passive intelligence without authentication. Public search may queue bounded enrichment through explicitly enabled passive providers, but it never launches an active scan or contacts a target application's services. Active jobs, worker management, dataset imports, provider configuration, monitoring management and vulnerability feed refresh require server-side administrator authorization. Browser administrators use an HttpOnly, SameSite=Strict session cookie plus a CSRF token; automation uses the `X-Admin-Token` header. The API key system is read-only and scope limited.
@@ -7,6 +14,9 @@ Public visitors can search indexed observations and cached/passive intelligence 
 ## Safety boundary
 
 The web image contains only `app/`; it has no scanner code and never contacts target application services. It may contact explicitly approved intelligence-provider APIs. The worker image contains `worker/` and accepts jobs only when both the control server and worker confirm that the target is inside the job's explicit authorization. Limits default to 4,096 addresses per ordinary job, 256 addresses per Deep Recon batch, 65,536 addresses per authorized campaign, 100 ports, bounded timeouts and rates, three lease attempts, TCP connect only, and no authentication, exploitation, stealth, or shell execution.
+
+Administrators can persist CIDR scan exclusions for opt-outs and sensitive networks. Exclusions override authorizations, cancel matching queued/leased jobs, and block future claims and result submissions. Disabling an exclusion does not revive cancelled jobs. This active-scan control does not delete or hide previously indexed observations. A worker may finish the small bounded batch already in progress; for an immediate stop, pause that authorized worker before adding the exclusion.
+
 
 ## Layout
 
@@ -181,6 +191,33 @@ docker compose -p scanlattice-staging -f compose.staging.yaml up -d --build
 ```
 
 To test a database copy, make a verified backup first, place only the copy in `scanlattice_staging_data`, and set `DATABASE_PATH` to its copied filename. Do not attach `web_scanlattice_data` or `worker_worker_state` to staging. This checkout has not been supplied with a production database copy, so no restore has been run.
+
+### PostgreSQL staging and migration
+
+PostgreSQL is an optional backend; SQLite remains the default. The PostgreSQL profile uses its own internal database service, project-scoped volume, staging secrets, and loopback-only web port. It does not read `.env` or attach production volumes. Validate it with fresh, staging-only credentials:
+
+```sh
+export STAGING_PROJECT="scanlattice-pg-$(date +%s)"
+export STAGING_PORT=18081
+export STAGING_ADMIN_TOKEN="$(openssl rand -hex 32)"
+export STAGING_ENROLLMENT_TOKEN="$(openssl rand -hex 32)"
+export STAGING_POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+scripts/validate_postgresql_staging.sh
+```
+
+The validator builds the PostgreSQL-backed web image, checks the API and schema migration, then runs the reserved-address staging E2E. By default it removes its project-scoped containers and volume on exit; set `KEEP_STAGING=true` to leave the isolated staging environment running for manual review. Never reuse a production project or volume name.
+
+To rehearse an existing SQLite migration, first make an authorized sanitized copy and point `DATABASE_URL` at a **new, disposable staging database**. The importer takes a consistent SQLite backup, streams batches, commits rowid cursors with each batch, and resumes using the source fingerprint. It refuses a non-empty target and requires the staging confirmation flag:
+
+```sh
+DATABASE_BACKEND=postgresql \
+DATABASE_URL='postgresql://scanlattice:<staging-password>@localhost:5432/scanlattice' \
+DATABASE_SCHEMA=public \
+python3 scripts/migrate_sqlite_to_postgresql.py /path/to/sanitized-copy.sqlite \
+  --schema public --target-is-disposable-staging
+```
+
+The source file is never modified. This rehearsal does not cut over a running application or authorize production migration. SQLite remains available for rollback; production adoption still requires a separately approved backup, restore, compatibility, load, and rollback exercise.
 
 ### Resumable dataset ingestion
 

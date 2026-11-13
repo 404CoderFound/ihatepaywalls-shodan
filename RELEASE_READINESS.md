@@ -1,6 +1,16 @@
-# ScanLattice v1.0 Release Readiness
+# ScanLattice v1.0 Release Readiness (historical audit)
 
-**Status: not production-ready.** This audit verifies local application behavior and a frozen v0.4 migration fixture. Docker staging, an operator database restore, live provider synchronization, and production deployment were not performed.
+> This file records an earlier v1.0 audit. It predates the PostgreSQL v2
+> disposable Compose rehearsals and is not the current v2 release status. See
+> [the v2 Debian staging runbook](deploy/DEBIAN_V2_STAGING_RUNBOOK.md),
+> [the guarded production import procedure](deploy/PRODUCTION_IMPORT.md), and
+> [the v2 cutover checklist](V2_PRODUCTION_CUTOVER_CHECKLIST.md). Production
+> remains **not approved** until the listed manual gates are completed.
+
+**Historical status:** not production-ready. The original audit verified local
+application behavior and a frozen v0.4 migration fixture. Docker staging, an
+operator database restore, live provider synchronization, and production
+deployment had not been performed at that time.
 
 ## Verified working features
 
@@ -52,7 +62,7 @@ The local HTTP run used `SESSION_COOKIE_SECURE=false` only for loopback transpor
 - Local `PRAGMA integrity_check`: **ok** on the fresh E2E database. `sh -n scripts/validate_staging.sh` and `git diff --check`: passed.
 - `scripts/validate_staging.sh` was invoked and exited **2** with “Docker is required for container validation.” `docker` and `docker compose` are absent. Container builds, image ownership inspection, isolated Compose E2E, and in-container integrity checks remain unverified.
 - Investigated CI run [42882609443](https://github.com/404CoderFound/ihatepaywalls-shodan/actions/runs/42882609443) for commit `5732e5a019b76822d7aece4b2d5364e004da9777`. The GitHub check annotation states that the job **was not started because the account is locked due to a billing issue**; runner ID is 0 and the job has no executed steps. This is not a code/test failure and cannot be fixed in the repo. Re-enable billing and rerun Actions before treating CI as passing.
-- `worker/Dockerfile` now uses `COPY --chown=10001:10001`. The Docker staging validator builds and checks the worker image without starting its scanner loop. See `POSTGRES_MIGRATION_PLAN.md` for the separately scoped PostgreSQL design; no PostgreSQL implementation or migration has been performed.
+- `worker/Dockerfile` now uses `COPY --chown=10001:10001`. The Docker staging validator builds and checks the worker image without starting its scanner loop. PostgreSQL groundwork is being implemented on a separate feature branch: its backend, schema, isolated profile, and importer are not yet validated by Docker or CI and are not part of this release-readiness result. See `POSTGRES_MIGRATION_PLAN.md` for the remaining gates.
 
 ## Docker tests still required
 
@@ -119,25 +129,19 @@ STAGING_ENROLLMENT_TOKEN="$(openssl rand -hex 32)" \
 scripts/validate_staging.sh
 ```
 
-The validator stops the staging container/network on exit and retains the project-scoped named data volume for inspection. To keep its container running for manual review, set `KEEP_STAGING=true`; clean it up with the same Compose project and staging file. It refuses an occupied loopback port, an existing project container, or an existing same-name staging volume. Do not reuse any production project/volume name.
+By default, the validator removes the staging container, network, and project-scoped named data volume on exit. To keep the staging environment running for manual review, set `KEEP_STAGING=true`; clean it up afterward with the same Compose project and staging file, using `down --volumes` when discarding its data. It refuses an occupied loopback port, an existing project container, or an existing same-name staging volume. Do not reuse any production project/volume name.
 
 ## Rollback procedure
 
-1. Stop only the named staging project, preserving its volume:
+1. Stop only the named staging project. Add `--volumes` to discard the temporary staging data:
 
    ```sh
    docker compose --env-file /dev/null -p "$STAGING_PROJECT" \
-     -f compose.staging.yaml down
+     -f compose.staging.yaml down --volumes
    ```
 
-2. To discard staging test data, first inspect the exact volume and confirm its Compose project label is the staging project, then remove only that volume:
-
-   ```sh
-   docker volume inspect "${STAGING_PROJECT}_scanlattice_staging_data"
-   docker volume rm "${STAGING_PROJECT}_scanlattice_staging_data"
-   ```
-
-3. To roll back a staging code upgrade, deploy the prior known-good release commit/image using a new staging project name. Keep the failed staging volume for diagnosis until its data is explicitly no longer needed.
+2. To preserve staging test data for diagnosis, stop the named project without `--volumes`; inspect the exact volume and its Compose project label before later removing it.
+3. To roll back a staging code upgrade, deploy the prior known-good release commit/image using a new staging project name. Keep a failed staging volume only while diagnosis needs its data.
 4. For a future production migration rollback, stop production writes, restore the verified pre-migration database backup to a new path/volume, verify it with SQLite integrity checks and an application smoke test, then switch back only under an approved production change. **This procedure has not been rehearsed on production data and is not authorization to access production.** Do not attempt a down-migration or overwrite the only backup.
 
 ## Production deployment prerequisites
