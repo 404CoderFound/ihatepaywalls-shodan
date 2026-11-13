@@ -1,0 +1,7 @@
+# Locally built with Docker Buildx; do not replace with a floating tag.
+source_commit=4f5b1beb18a8380a7763af2a0c45d69f825aa8f1
+platform=linux/amd64
+python_base=python:3.13-slim@sha256:48d884813cf44e927cf64c5529dd630dd3b18338c6dc727991eef9b71e934a20
+postgres_image=postgres:17.11-alpine@sha256:4717f90960a225c2d1c5dac50508c401230f693ff626e06e84e6db0a68ded508
+platform_manifest=sha256:c747ee2b4f266fdf22040bc202c7711ce155ea7bff60ab7e5345a9dcd9f44d4b
+docker_image_id=sha256:d3351b3b7a5a14254cc0a06a4f9a5cdec00bf8772845306f9b3bdf7edc956678

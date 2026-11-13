@@ -109,6 +109,7 @@ runner() {
     --workdir /srv --env PYTHONPATH=/srv \
     --env DATABASE_BACKEND=postgresql --env DATABASE_SCHEMA=rehearsal \
     --env "DATABASE_URL=postgresql://scanlattice:$STAGING_POSTGRES_PASSWORD@postgres:5432/scanlattice" \
+    --env "ACTIVE_SCANNING_ENABLED=${ACTIVE_SCANNING_ENABLED:-false}" \
     --env PASSIVE_ENRICHMENT_ENABLED=false \
     --env MONITORING_AUTO_CHECKS=false \
     --env VULNERABILITY_AUTO_REFRESH=false \
@@ -216,7 +217,7 @@ echo "Testing the actual v2 API against the migrated PostgreSQL COPY"
 runner python /srv/scripts/validate_migrated_postgresql_app.py
 
 echo "Testing fake, non-scanning worker API contract on migrated PostgreSQL"
-runner python /srv/scripts/validate_migrated_postgresql_worker_protocol.py
+ACTIVE_SCANNING_ENABLED=true runner python /srv/scripts/validate_migrated_postgresql_worker_protocol.py
 
 echo "Stopping the local staging web container before the single-client import guard"
 compose stop web-staging >/dev/null

@@ -26,7 +26,27 @@ from .index_scheduler import (
 )
 
 ROOT=Path(__file__).resolve().parent
-ADMIN_TOKEN=os.getenv("ADMIN_TOKEN",""); ENROLLMENT_TOKEN=os.getenv("ENROLLMENT_TOKEN","")
+def _configured_secret(name: str) -> str:
+    value=os.getenv(name, "")
+    file_path=os.getenv(f"{name}_FILE", "")
+    if value and file_path:
+        raise RuntimeError(f"Configure only one of {name} or {name}_FILE")
+    if not file_path:
+        return value
+    path=Path(file_path)
+    try:
+        info=path.stat()
+        if not path.is_file() or (info.st_mode & 0o777) not in {0o400, 0o440, 0o600}:
+            raise RuntimeError(f"{name}_FILE must be a regular file with mode 0400, 0440, or 0600")
+        value=path.read_text(encoding="utf-8").rstrip("\r\n")
+    except OSError as exc:
+        raise RuntimeError(f"Unable to read configured {name}_FILE") from exc
+    if not value:
+        raise RuntimeError(f"Configured {name}_FILE is empty")
+    return value
+
+ADMIN_TOKEN=_configured_secret("ADMIN_TOKEN"); ENROLLMENT_TOKEN=_configured_secret("ENROLLMENT_TOKEN")
+ACTIVE_SCANNING_ENABLED=os.getenv("ACTIVE_SCANNING_ENABLED","true").lower() in {"1","true","yes"}
 SEED_DEMO=os.getenv("SEED_DEMO","false").lower()=="true"
 OFFLINE=int(os.getenv("WORKER_OFFLINE_SECONDS","45")); LEASE=int(os.getenv("JOB_LEASE_SECONDS","90"))
 MAX_TARGETS=int(os.getenv("MAX_JOB_TARGETS","4096")); MAX_PORTS=int(os.getenv("MAX_JOB_PORTS","100"))
@@ -46,6 +66,15 @@ app.mount("/static",StaticFiles(directory=ROOT/"static"),name="static")
 
 @app.middleware("http")
 async def bounded(request:Request,call_next):
+    if not ACTIVE_SCANNING_ENABLED:
+        path=request.url.path
+        worker_api=path.startswith("/api/worker/")
+        job_creation=(request.method=="POST" and path in {
+            "/api/admin/jobs", "/api/admin/refresh-requests", "/api/admin/deep-recon/launch",
+            "/api/admin/vulnerabilities/refresh", "/api/admin/monitor/run-once",
+        })
+        if worker_api or job_creation:
+            return JSONResponse({"detail":"Active scanning and probe execution are disabled"},503)
     screenshot_path=request.url.path.startswith("/api/admin/hosts/") and request.url.path.endswith("/screenshots")
     body_limit=int(os.getenv("MAX_IMPORT_CHUNK_BYTES",str(8*1024*1024))) if request.url.path=="/api/admin/datasets/imports" else MAX_SCREENSHOT_BYTES if screenshot_path else int(os.getenv("MAX_BODY_BYTES",str(2*1024*1024)))
     if int(request.headers.get("content-length","0"))>body_limit:
@@ -121,7 +150,7 @@ def startup():
 @app.get("/")
 def home():return FileResponse(ROOT/"static"/"index.html")
 @app.get("/api/health")
-def health():return {"status":"ok","role":"control-plane","active_scanning":False,"passive_enrichment":ENRICHMENT_ENABLED,"host_page_size":10,"version":"1.0.0"}
+def health():return {"status":"ok","role":"control-plane","active_scanning":ACTIVE_SCANNING_ENABLED,"passive_enrichment":ENRICHMENT_ENABLED,"host_page_size":10,"version":"1.0.0"}
 @app.get("/api/stats")
 def stats():
     with connection() as db:return {"observations":db.execute("SELECT COUNT(*) FROM observations").fetchone()[0],"services":db.execute("SELECT COUNT(*) FROM services").fetchone()[0],"hosts":db.execute("SELECT COUNT(*) FROM (SELECT ip FROM hosts UNION SELECT ip FROM passive_records WHERE ip!='')").fetchone()[0],"passive_records":db.execute("SELECT COUNT(*) FROM passive_records").fetchone()[0],"workers_online":db.execute("SELECT COUNT(*) FROM workers WHERE last_seen>?",(int(time.time())-OFFLINE,)).fetchone()[0],"demo_enabled":SEED_DEMO}
@@ -928,4 +957,4 @@ def logs(x_admin_token:Annotated[str|None,Header()]=None):
 @app.get("/api/admin/settings")
 def settings(x_admin_token:Annotated[str|None,Header()]=None):
     admin(x_admin_token)
-    return {"active_scanning_on_control_plane":False,"max_job_targets":MAX_TARGETS,"max_job_ports":MAX_PORTS,"job_lease_seconds":LEASE,"worker_offline_seconds":OFFLINE,"database":"sqlite","configuration_source":"environment"}
+    return {"active_scanning_on_control_plane":ACTIVE_SCANNING_ENABLED,"max_job_targets":MAX_TARGETS,"max_job_ports":MAX_PORTS,"job_lease_seconds":LEASE,"worker_offline_seconds":OFFLINE,"database":os.getenv("DATABASE_BACKEND","sqlite"),"configuration_source":"environment"}

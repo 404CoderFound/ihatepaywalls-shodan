@@ -1,0 +1,17 @@
+# Base digest is the x86_64 manifest. Buildx selects linux/amd64 at build time.
+FROM python:3.13-slim@sha256:48d884813cf44e927cf64c5529dd630dd3b18338c6dc727991eef9b71e934a20
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.revision=$VCS_REF org.opencontainers.image.source="https://github.com/404CoderFound/ihatepaywalls-shodan"
+WORKDIR /srv
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+COPY requirements.staging.lock /srv/requirements.staging.lock
+RUN python -m pip install --no-cache-dir --requirement /srv/requirements.staging.lock \
+    && useradd --uid 10001 --create-home --shell /usr/sbin/nologin scanlattice \
+    && mkdir -p /data \
+    && chown 10001:10001 /data
+COPY --chown=10001:10001 app /srv/app
+COPY --chown=10001:10001 migrations /srv/migrations
+USER 10001:10001
+ENV DATABASE_BACKEND=postgresql DATABASE_SCHEMA=public DATABASE_PATH=/tmp/unused-sqlite.db
+EXPOSE 8080
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--proxy-headers", "--forwarded-allow-ips", "127.0.0.1"]

@@ -7,7 +7,7 @@ def test_authentication_and_registration(system,admin_headers):
     data,_=enroll(client)
     workers=client.get("/api/admin/workers",headers=admin_headers).json()["workers"]
     assert workers[0]["id"]==data["worker_id"] and workers[0]["online"]
-    assert client.get("/api/health").json()["active_scanning"] is False
+    assert client.get("/api/health").json()["active_scanning"] is True
 
 def test_query_parser_pagination_and_validation(system,admin_headers):
     client,_,_=system
