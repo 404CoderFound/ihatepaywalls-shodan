@@ -142,6 +142,10 @@ def main() -> None:
         assert config["networks"]["staging_private"]["internal"] is True
         assert config["networks"]["staging_loopback"]["driver_opts"][
             "com.docker.network.bridge.enable_ip_masquerade"] == "false"
+        assert config["networks"]["staging_loopback"]["driver_opts"][
+            "com.docker.network.bridge.name"] == "slv2stage0"
+        assert config["networks"]["staging_private"]["driver_opts"][
+            "com.docker.network.bridge.name"] == "slv2priv0"
         assert services["web"]["environment"]["ACTIVE_SCANNING_ENABLED"] == "false"
         rendered = json.dumps(config)
         for value in secrets_by_name.values():
@@ -168,6 +172,14 @@ def main() -> None:
         assert db_ports.get("5432/tcp") in (None, [])
         assert run([docker, "network", "inspect", "--format", "{{.Internal}}",
                     f"{project}_staging_private"]).stdout.strip() == b"true"
+        bridge_name = run([docker, "network", "inspect", "--format",
+                           '{{index .Options "com.docker.network.bridge.name"}}',
+                           f"{project}_staging_loopback"]).stdout.decode().strip()
+        assert bridge_name == "slv2stage0", f"unexpected staging bridge interface: {bridge_name!r}"
+        private_bridge_name = run([docker, "network", "inspect", "--format",
+                                   '{{index .Options "com.docker.network.bridge.name"}}',
+                                   f"{project}_staging_private"]).stdout.decode().strip()
+        assert private_bridge_name == "slv2priv0", f"unexpected private staging bridge: {private_bridge_name!r}"
         compose("restart", "postgres")
         wait_healthy("postgres")
         compose("restart", "web")

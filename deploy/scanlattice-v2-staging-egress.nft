@@ -1,0 +1,13 @@
+table inet scanlattice_v2_staging {
+    chain input_guard {
+        type filter hook input priority -5; policy accept;
+        iifname "slv2stage0" counter drop comment "Block staging containers from host services"
+        iifname "slv2priv0" counter drop comment "Block staging containers from host services"
+    }
+
+    chain forward_guard {
+        type filter hook forward priority -5; policy accept;
+        iifname "slv2stage0" oifname != "slv2stage0" counter drop comment "Block staging container egress"
+        iifname "slv2priv0" oifname != "slv2priv0" counter drop comment "Block staging container egress"
+    }
+}

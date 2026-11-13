@@ -68,10 +68,26 @@ The worker Compose project resolves `worker_state` to the external Docker volume
 
 ## Production readiness blockers / TODO
 
-- [ ] Production Compose override, PostgreSQL network/secret/volume definition reviewed.
-- [ ] Production-safe import procedure written and rehearsed without reusing the staging-only flag.
-- [ ] PostgreSQL writes/worker protocol test with no external network probes.
-- [ ] Final backup verified and off-host; PostgreSQL restore tested.
-- [ ] Exact release commit, image digest and rollback deploy plan pinned.
-- [ ] Operator approves downtime and cutover explicitly.
-- [ ] Release documentation brought up to date (`POSTGRES_MIGRATION_PLAN.md` still describes PostgreSQL as a plan; `MIGRATION_GUIDE.md` contains historic `worker-v02` instructions that must **not** be followed blindly on the current `scanlattice-aws` deployment).
+The software-side importer and disposable PostgreSQL rehearsals now exist. This
+does not authorize production execution. Before cutover, all items below remain
+required:
+
+- [ ] Review the production-specific Compose overlay, private network, secret
+  ownership, persistent-volume name, resource limits and backup retention.
+- [ ] Obtain a maintenance window and separately approved GO for draining the
+  scanner, freezing writers, creating the final snapshot and running the exact
+  importer. Never use a stale staging backup.
+- [ ] Run the import dry-run against that frozen snapshot and explicitly
+  approved target identity; retain the independent rollback copy and checksums.
+- [ ] Execute only with `--execute`, `--acknowledge-writers-frozen`, and the
+  recorded approval reference; verify table counts, IDs and sequences.
+- [ ] Test restore, API/admin UI and worker identity/heartbeat in a production
+  rehearsal before routing traffic or reconnecting the AWS worker.
+- [ ] Decide a tested post-write reverse migration strategy. Until it exists,
+  reverting to SQLite after PostgreSQL accepts writes is a data-loss decision;
+  freeze writes instead of making an automatic reverse switch.
+- [ ] Complete provider/license/quotas review, monitoring, storage/capacity and
+  incident-response plan. These cannot be proven by synthetic local tests.
+- [ ] Keep PR #7 and `main` unchanged unless separately approved. The old
+  `MIGRATION_GUIDE.md` contains historical worker-v02 instructions; do not
+  apply them to current `scanlattice-aws` without review.

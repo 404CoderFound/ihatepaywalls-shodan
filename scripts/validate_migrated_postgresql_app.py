@@ -26,7 +26,7 @@ assert len(os.environ.get("ENROLLMENT_TOKEN", "")) >= 32
 with connection() as db:
     before = {
         table: db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-        for table in ("hosts", "observations", "services", "scan_jobs", "workers", "passive_records")
+        for table in ("hosts", "observations", "services", "scan_jobs", "workers", "passive_records", "scan_exclusions")
     }
     host = db.execute("SELECT ip FROM hosts ORDER BY ip LIMIT 1").fetchone()
     expected_auth = db.execute("SELECT COUNT(*) FROM authorizations").fetchone()[0]
@@ -44,7 +44,12 @@ def get_ok(client: TestClient, path: str, *, params: dict | None = None, authent
     return response.json()
 
 
-with TestClient(app) as client:
+with TestClient(app, base_url="https://testserver") as client:
+    ui = client.get("/")
+    assert ui.status_code == 200 and "SCANLATTICE" in ui.text
+    for asset in ("/static/app.js", "/static/insights.js", "/static/style.css"):
+        response = client.get(asset)
+        assert response.status_code == 200 and response.content, f"UI asset unavailable: {asset}"
     health = get_ok(client, "/api/health")
     assert health["status"] == "ok" and health["active_scanning"] is False
     stats = get_ok(client, "/api/stats")
@@ -60,6 +65,11 @@ with TestClient(app) as client:
         assert detail["host"]["ip"] == host[0], "Host detail IP differs"
 
     assert client.get("/api/admin/profiles").status_code in (401, 403), "Admin route accepted anonymous request"
+    login = client.post("/api/admin/session", json={"admin_token": admin})
+    assert login.status_code == 200 and login.json()["authenticated"] is True
+    assert client.get("/api/admin/session").json()["authenticated"] is True
+    assert client.get("/api/admin/profiles").status_code == 200, "Cookie-authenticated admin UI request failed"
+    assert client.post("/api/admin/authorizations", json={"name": "CSRF must block", "cidr": "192.0.2.0/24"}).status_code == 403
     authorizations = get_ok(client, "/api/admin/authorizations", authenticated=True)
     profiles = get_ok(client, "/api/admin/profiles", authenticated=True)
     assert len(authorizations["authorizations"]) == expected_auth
@@ -69,9 +79,13 @@ with TestClient(app) as client:
     # scheduler may update the disposable database but no real worker is present.
     jobs = get_ok(client, "/api/admin/jobs", authenticated=True)
     workers = get_ok(client, "/api/admin/workers", authenticated=True)
+    generations = get_ok(client, "/api/admin/scan-generations", authenticated=True)
+    tasks = get_ok(client, "/api/admin/scan-tasks", authenticated=True)
+    exclusions = get_ok(client, "/api/admin/scan-exclusions", authenticated=True)
+    assert len(exclusions["exclusions"]) == before["scan_exclusions"]
     assert len(workers["workers"]) == expected_workers
-    assert "jobs" in jobs
-    print("PASS: migrated PostgreSQL app health, stats, search, host detail and admin/job/worker API")
+    assert "jobs" in jobs and "generations" in generations and "tasks" in tasks
+    print("PASS: PostgreSQL-backed UI assets, health, stats, search, host detail, admin session/CSRF, scan history, jobs and worker listings")
 
 with connection() as db:
     after = {

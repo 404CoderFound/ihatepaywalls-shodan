@@ -1,0 +1,12 @@
+[Unit]
+Description=ScanLattice v2 staging host and egress isolation
+After=nftables.service docker.service
+PartOf=nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/scanlattice-v2-staging-egress --ensure
+
+[Install]
+WantedBy=multi-user.target

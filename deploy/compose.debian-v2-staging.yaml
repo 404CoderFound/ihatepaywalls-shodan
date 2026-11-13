@@ -81,9 +81,14 @@ services:
 networks:
   staging_private:
     internal: true
+    driver_opts:
+      com.docker.network.bridge.name: "slv2priv0"
   staging_loopback:
     driver: bridge
     driver_opts:
+      # Stable Linux bridge name lets the separate nftables guard survive
+      # Compose restarts and network recreation without touching Docker chains.
+      com.docker.network.bridge.name: "slv2stage0"
       com.docker.network.bridge.enable_ip_masquerade: "false"
       com.docker.network.bridge.host_binding_ipv4: "127.0.0.1"
 
