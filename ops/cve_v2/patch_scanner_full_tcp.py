@@ -24,7 +24,8 @@ def patch(f,old,new):
         return
     if s.count(old)!=1:
         raise SystemExit("Unexpected source version; refusing to modify "+str(f))
-    shutil.copy2(f,str(f)+".before-full-tcp")
+    if not Path(str(f)+".before-full-tcp").exists():
+        shutil.copy2(f,str(f)+".before-full-tcp")
     f.write_text(s.replace(old,new,1))
     print("PATCHED",f)
 
