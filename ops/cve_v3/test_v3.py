@@ -113,7 +113,8 @@ class CVEV3Tests(unittest.TestCase):
           <script src="/static/app.js"></script>
           <script src="/static/insights.js"></script></body></html>"""
         result = publish.validate_ui(html)
-        self.assertTrue(all(result.values()))
+        self.assertIs(result, True)
+        self.assertTrue(all(publish.ui_features(html).values()))
         self.assertNotIn('data-page="vulnerabilities"', html)
 
     def test_publisher_fails_closed_on_unsupported_dom(self):
