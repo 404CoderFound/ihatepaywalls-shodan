@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Rescan eligible ScanLattice-indexed hosts on AWS, with a strict scope gate.
+"""Queue overnight rescans for every public IP indexed by ScanLattice.
 
-The public /api/search page gives the inventory, NOT authorization to scan.
-Only configured authorized_cidrs are eligible. This is intentionally
-one-shot, paced scheduling; individual per-IP recurring jobs are NOT created.
+The website inventory is the target list; no separate CIDR allowlist.
+The scanner's existing exclusions and rate/concurrency limits still apply.
+Schedules one-shot jobs rather than per-IP recurring jobs.
 """
 import argparse
 from datetime import datetime, timedelta, timezone
@@ -42,16 +42,8 @@ def load_config(path):
             origin.username or origin.password or origin.path not in ("", "/") or
             origin.query or origin.fragment):
         raise ValueError("website_url must be an HTTPS origin without path/query")
-    allowed = cfg.get("authorized_cidrs")
-    if not isinstance(allowed, list) or not allowed:
-        raise ValueError("authorized_cidrs must contain explicit approved ranges; nothing queued")
-    cfg["_allowed"] = [ipaddress.ip_network(n, strict=True) for n in allowed]
-    if any((n.version == 4 and n.prefixlen < 8) or
-           (n.version == 6 and n.prefixlen < 32) for n in cfg["_allowed"]):
-        raise ValueError("scope too broad; explicitly authorize narrower CIDRs")
-    if len(cfg["_allowed"]) > 500:
-        raise ValueError("too many authorized ranges")
-    # Supplement, never weaken, the scanner's own policy exclusions.
+    # The website's full indexed host inventory is the target scope.
+    # Still honor existing scanner exclusions and never enqueue non-routable IPs.
     scanner = json.loads(Path(cfg.get("scanner_config", "/etc/scanlattice-v3/config.json")).read_text())
     cfg["_excluded"] = [ipaddress.ip_network(n, strict=False)
                         for n in scanner.get("excluded_cidrs", [])]
@@ -167,7 +159,7 @@ def permitted(ip, cfg):
         return False
     if any(obj in n for n in cfg["_excluded"]):
         return False
-    return any(obj in network for network in cfg["_allowed"])
+    return True
 
 def scanner(args, binary="/usr/local/bin/scanlattice-v3"):
     result = subprocess.run([binary, *args], capture_output=True,
@@ -248,8 +240,8 @@ def run(cfg, enqueue=False, fetch=http_json, call=scanner, now=None):
                              ipaddress.ip_address(ip).version,
                              int(ipaddress.ip_address(ip))))
     print("Website indexed hosts:",len(ips))
-    print("Authorized public hosts:",len(approved))
-    print("Skipped outside authorized scope:",len(ips)-len(approved))
+    print("Public hosts not excluded:",len(approved))
+    print("Skipped non-public or excluded:",len(ips)-len(approved))
     print("Hosts due for rescan:",len(due))
     print("Scanner pending/running jobs:",pending)
     print("Already queued today:",nightly_jobs,"jobs /",nightly_checks,"checks")
