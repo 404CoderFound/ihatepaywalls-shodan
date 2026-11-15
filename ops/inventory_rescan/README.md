@@ -6,9 +6,9 @@ are due. It does NOT require adding each host individually.
 
 This reads the public GET /api/search?sort=ip&limit=100&page=N
 response for indexed hosts, plus all passive-intelligence pages for
-additional explicit IPs. It does NOT enumerate every address inside an
-ASN/prefix and does NOT turn passive observations into scanning authorization.
-Reading the website is **not** authorization to scan a host.
+additional explicit IPs. All public, non-excluded IPs on the website
+are eligible, without maintaining an additional CIDR list.
+It does NOT enumerate every address inside an ASN/prefix.
 
 The scheduler uses existing v3 daemon persistent queue. It never modifies
 the Docker image, PostgreSQL, or CVE correlation tables.
@@ -23,22 +23,15 @@ git clone --depth 1 --branch feature/nvd-full-applicability-v1 \
 sudo bash ~/scanlattice-inventory-upgrade/ops/inventory_rescan/install.sh
 ~~~
 
-Before enabling, edit the authorized scope:
-
-~~~bash
-sudo nano /etc/scanlattice-v3/inventory-rescan.json
-~~~
-
-Set authorized_cidrs to the ranges you own or are expressly
-authorized to scan. Do not use 0.0.0.0/0 or your entire ASN merely because
-an IP appears in the website. The AWS scanner's own excludes always apply,
-as does an additional public-address filter. Private LAN IPs require a
-separately deployed local scanner.
+No CIDR file or per-IP list is needed. The scheduler takes its entire
+target inventory from the website every time. Existing scanner exclusions
+remain active, and non-public IPs are skipped because AWS cannot reach
+private LANs over the public Internet.
 
 Keep ports=extended until the all-TCP scanner changes are tested. The
 current v3.2 extended profile checks **91 TCP ports**.
 
-Preview (never queues jobs):
+Preview the full website inventory (never queues jobs):
 
 ~~~bash
 sudo scanlattice-inventory-rescan
@@ -65,7 +58,7 @@ Previously queued jobs do not automatically cancel.
 ## Coverage limits and scheduling
 
 The example config defaults to:
-- max 5,000 indexed website hosts (fail closed if larger)
+- max 5,000 indexed website hosts (configurable operational limit, not a CIDR filter)
 - at most 3 new jobs each 15-minute tick
 - at most 3 active/pending jobs
 - at most 100 jobs and 12,000 TCP checks each UTC night
@@ -77,8 +70,8 @@ night. If the website grows beyond AWS t3.small capacity, the scheduler
 shows a backlog and prioritizes hosts with oldest completed scans.
 Review throughput before expanding the worker fleet or resource budgets.
 
-Keep provider scanning rules, AWS security-group rules, exclusions, and
-abuse-contact policy aligned with authorized target scope.
+Keep your existing provider scanning rules, AWS security-group policies,
+scanner exclusions, rate limits, and abuse-contact policy in place.
 
 ## Disable new jobs
 
