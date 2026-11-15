@@ -119,6 +119,18 @@ class NightlyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 nightly.load_config(cfg)
 
+    def test_atomic_go_job_files_are_read(self):
+        import tempfile, json, pathlib
+        with tempfile.TemporaryDirectory() as folder:
+            jobs=pathlib.Path(folder)/"jobs"
+            jobs.mkdir()
+            (jobs/"abc.json").write_text(json.dumps({
+                "status":"queued","request":{"target_type":"ip",
+                "target":"185.220.213.51","ports":"extended"}}))
+            cfg=config()
+            cfg["_scanner_state_dir"]=folder
+            self.assertEqual(len(nightly.read_jobs(cfg,None)),1)
+
     def test_inventory_pagination_drift_aborts(self):
         cfg=config()
         with self.assertRaises(RuntimeError):
