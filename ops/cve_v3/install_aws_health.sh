@@ -14,7 +14,7 @@ fi
 test -f /etc/scanlattice-v3/config.json
 test -x /usr/local/bin/scanlattice-v3
 install -d -m 0755 /usr/local/lib/scanlattice/cve_v3
-install -m 0644 "$ROOT/doctor.py" /usr/local/lib/scanlattice/cve_v3/doctor.py
+install -m 0644 "$ROOT/doctor.py" "$ROOT/verify_ingestion.py" /usr/local/lib/scanlattice/cve_v3/
 cat >/usr/local/sbin/scanlattice-aws-health <<'EOF'
 #!/bin/sh
 exec /usr/bin/python3 /usr/local/lib/scanlattice/cve_v3/doctor.py --role aws \
@@ -32,6 +32,7 @@ Type=oneshot
 User=root
 EnvironmentFile=-/etc/scanlattice-v3/health.env
 ExecStart=/usr/local/sbin/scanlattice-aws-health
+ExecStartPost=/usr/bin/python3 /usr/local/lib/scanlattice/cve_v3/verify_ingestion.py
 TimeoutStartSec=120
 NoNewPrivileges=true
 EOF
