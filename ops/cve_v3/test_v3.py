@@ -115,13 +115,21 @@ class CVEV3Tests(unittest.TestCase):
         self.assertIsNone(fingerprint.fingerprint({
             "banner":"Apache/2.4.58\nnginx/1.24.0","cpe":""
         }))
-    def test_v3_frontend_escaper_and_syntax(self):
-        js = Path(__file__).with_name("cve-v3.js")
-        source = js.read_text()
-        self.assertIn("&#39;", source)
-        self.assertNotIn(':"&quot;":"&#39;"', source)
-        if shutil.which("node"):
-            subprocess.run(["node", "--check", str(js)], check=True)
+    def test_frontend_syntax_and_no_unverified_host_results(self):
+        for file in ("cve-v3.js", "modern.js"):
+            js = Path(__file__).with_name(file)
+            source = js.read_text()
+            if shutil.which("node"):
+                subprocess.run(["node", "--check", str(js)], check=True)
+        js = Path(__file__).with_name("cve-v3.js").read_text()
+        self.assertIn("&#39;",js)
+        self.assertIn('v.status==="confirmed"',js)
+        self.assertNotIn("Research only:",js)
+        self.assertIn("/api/vulnerabilities?",js)
+        self.assertIn("page:String(page)",js)
+        css = Path(__file__).with_name("modern.css").read_text()
+        self.assertIn(".sl-modern .sl-cve-results",css)
+        self.assertIn("@media(max-width:760px)",css)
 
     def test_read_only_overlay_contains_complete_static_mount(self):
         yaml = publish.overlay_yaml("/srv/app/static")
