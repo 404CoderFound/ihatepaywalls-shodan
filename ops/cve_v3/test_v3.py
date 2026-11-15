@@ -49,6 +49,17 @@ class CVEV3Tests(unittest.TestCase):
             self.assertEqual(merged["CVE-2024-38472"],"vendor_not_affected")
             self.assertEqual(merged["CVE-2024-12345"],"vendor_affected")
 
+    def test_remote_nvd_matches_remain_research_only(self):
+        result=merge_report.combine(
+            {"generated_at":"2026-11-15T20:00:00+00:00",
+             "fingerprinted_services":1,"findings":[APACHE]},
+            {},meta("CVE-2024-38472"))
+        self.assertEqual(result["counts"]["research_candidate"],1)
+        self.assertNotIn("potential",result["counts"])
+        self.assertEqual(result["findings"][0]["status"],"research_candidate")
+        self.assertIn("NOT evidence",result["findings"][0]["note"])
+        self.assertNotIn("vendor_affected",result["counts"])
+
     def test_ubuntu_false_suppresses_unverified_remote(self):
         host=vendor(statuses={"CVE-2024-38472":"vendor_not_affected"})
         report={"generated_at":"2026-11-15T20:00:00+00:00",
