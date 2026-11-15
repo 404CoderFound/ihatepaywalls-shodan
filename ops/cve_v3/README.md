@@ -1,4 +1,4 @@
-# ScanLattice V3: finish the five pipeline workstreams
+# ScanLattice V3/V4: verified-only host findings and modern search
 
 This is a **staged** upgrade to the running PostgreSQL ScanLattice
 production installation. GitHub's default application tree and Docker Compose
@@ -202,3 +202,67 @@ and remain enabled unless you explicitly disable them.
   agent, package inventory, and a trusted delivery path.
 * Until the first actual AWS scan uploads and CVE timers finish on the
   user's running machines, end-to-end deployment is not verified.
+
+## V4: verified-only CVEs and modern search
+
+The update keeps the production Docker image and read-only static assets
+mount. sl-modern.css and sl-modern.js simplify navigation into five
+primary routes (Explore, Hosts, CVEs, Monitor, Admin), with the other
+pages accessible from More. Search results, filtering and buttons use
+a responsive, consistent design.
+
+**CVE catalog vs affected hosts.** Public CVE IDs and descriptions
+can be searched independently using the existing endpoint:
+GET /api/vulnerabilities?q=CVE-2024-3094&severity=&page=1&limit=25 .
+Typing an exact CVE ID in the main search also opens the CVE catalog.
+A catalog entry does not prove any indexed host is affected.
+
+**Strict verified-only policy.** The publisher suppresses ALL remote CPE,
+product and version correlations, including the existing 128 research
+signals, from the public host report. A finding can be published only
+with both of these sources for the same IP and CVE:
+
+1. Fresh on-host Canonical Ubuntu USN OVAL OpenSCAP package rule
+   with vendor_affected status, AND
+2. An independent and dated human-reviewed host-specific confirmation
+   that the affected component is present, the vulnerable configuration
+   applies, and the installed package remains unpatched.
+
+Root-managed JSON confirmations can be placed under
+/var/lib/scanlattice-cve/confirmed-host-evidence/ (never under a web root).
+Each must declare schema_version 1, ip, cve, status confirmed, booleans
+component_present, affected_configuration_verified and
+unpatched_installed_package_verified all true, verified_at in UTC ISO8601,
+and 8+ character reviewer, verification_method and evidence_reference.
+Confirmations expire after 48 hours; this validation prevents automatic
+promotion but does not create evidence or guarantee truth. Never fabricate
+confirmation files to populate the UI.
+
+There is no technically honest way to guarantee 100 percent vulnerability
+certainty from external fingerprinting. Zero confirmed means nothing
+has passed verification; it does not establish the host is secure.
+
+### Deploy on Debian after pulling the updated branch
+
+~~~bash
+git -C ~/scanlattice-finish pull --ff-only \
+  origin feature/finish-cve-pipeline-ui-monitor-v3
+sudo bash ~/scanlattice-finish/ops/cve_v3/install.sh
+sudo scanlattice-cve-v3 reconcile
+curl -fsSI https://scanlattice.plezi.eu/static/sl-modern.css
+curl -fsSI https://scanlattice.plezi.eu/static/sl-modern.js
+curl -fsS https://scanlattice.plezi.eu/static/cve-v3-public.json |
+  python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["counts"])'
+~~~
+
+This updates the existing mounted static directory with no Docker restart
+when the V3 overlay is active. Hard-refresh your browser after deployment.
+If the unit tests fail, do not activate the update.
+
+### Secret safety
+
+An administrator token pasted into a chat or log is compromised. Rotate
+the underlying Docker secret, then force-recreate only the web service
+using BOTH the original Compose configuration and the existing V3 read-only
+override. Never post the new token or commit secrets to Git.
+
