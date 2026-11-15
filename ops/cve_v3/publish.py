@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.request
 import urllib.error
 
@@ -145,20 +146,31 @@ def overlay_yaml(target):
 
 
 def health_check():
-    for url in (BASE_HEALTH, JS_URL, REPORT_URL):
-        request = urllib.request.Request(
-            url, headers={"Cache-Control": "no-cache",
-                          "User-Agent": "ScanLattice-V3-Publisher/2.0"})
-        with urllib.request.urlopen(request, timeout=20) as response:
-            body = response.read(15_000_000 + 1)
-            if response.status != 200:
-                raise RuntimeError("Public health endpoint not healthy: " + url)
-        if url == JS_URL and b"ScanLattice V3" not in body:
-            raise RuntimeError("Public CVE V3 JS mismatch")
-        if url == REPORT_URL:
-            result = json.loads(body)
-            if result.get("schema_version") != 1:
-                raise RuntimeError("Public V3 JSON invalid")
+    error = None
+    # Docker Compose may report "running" before the FastAPI process is ready.
+    # Retry the real public endpoints before considering rollback.
+    for attempt in range(10):
+        try:
+            for url in (BASE_HEALTH, JS_URL, REPORT_URL):
+                request = urllib.request.Request(
+                    url, headers={"Cache-Control": "no-cache",
+                                  "User-Agent": "ScanLattice-V3-Publisher/2.0"})
+                with urllib.request.urlopen(request, timeout=8) as response:
+                    body = response.read(15_000_000 + 1)
+                    if response.status != 200:
+                        raise RuntimeError("Public endpoint unhealthy: " + url)
+                if url == JS_URL and b"ScanLattice V3" not in body:
+                    raise RuntimeError("Public CVE V3 JS mismatch")
+                if url == REPORT_URL:
+                    result = json.loads(body)
+                    if result.get("schema_version") != 1:
+                        raise RuntimeError("Public V3 JSON invalid")
+            return
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+            error = exc
+            if attempt != 9:
+                time.sleep(2)
+    raise RuntimeError("V3 public health check did not pass: " + str(error))
 
 
 def inspect_ui():
