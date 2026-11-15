@@ -134,6 +134,42 @@ def checked_report():
         raise RuntimeError("V3 report invalid. No files changed.")
 
 
+def remove_legacy_potential_views(directory):
+    """Remove old speculative host/UI views from staged static assets.
+
+    Fail closed if an unexpected production JS variant is encountered.
+    Original production Docker image remains untouched.
+    """
+    appjs = directory / "app.js"
+    insights = directory / "insights.js"
+    before = 'const potential=(data.potential_vulnerabilities||[]).map'
+    after = 'const potential=([]).map'
+    original = appjs.read_text()
+    if before in original:
+        atomic_bytes(appjs, original.replace(before, after, 1).encode())
+    elif after not in original:
+        raise RuntimeError("Cannot suppress legacy host correlations: app.js changed")
+
+    source = insights.read_text()
+    marker = "// ScanLattice verified-only CVE route"
+    entry = "async function show(path) {"
+    if marker in source:
+        return
+    if source.count(entry) != 1:
+        raise RuntimeError("Cannot suppress legacy CVE catalog: insights.js changed")
+    patch = '''
+    // ScanLattice verified-only CVE route
+    if(path==="vulnerabilities"){
+      document.querySelectorAll(".page").forEach(p=>p.classList.toggle("hidden",p.id!=="page-insight"));
+      document.querySelectorAll("[data-page]").forEach(a=>a.classList.toggle("active",a.dataset.page===path));
+      document.getElementById("insight-title").textContent="CVE catalog";
+      document.getElementById("insight-content").innerHTML='<div class="empty">Loading CVE catalog…</div>';
+      return;
+    }
+'''
+    atomic_bytes(insights, source.replace(entry, entry + "\n" + patch, 1).encode())
+
+
 def image_check():
     actual = docker("inspect", "-f", "{{.Config.Image}}", CONTAINER,
                     capture_output=True, text=True).stdout.strip()
@@ -241,6 +277,7 @@ def prepare_static():
             atomic_copy(MODERN_CSS, tmp / "sl-modern.css")
             atomic_copy(MODERN_JS, tmp / "sl-modern.js")
             atomic_copy(LOCAL_REPORT, tmp / "cve-v3-public.json")
+            remove_legacy_potential_views(tmp)
             os.rename(tmp, PUBLISHED)
         except Exception:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -257,6 +294,7 @@ def prepare_static():
         atomic_copy(MODERN_CSS, PUBLISHED / "sl-modern.css")
         atomic_copy(MODERN_JS, PUBLISHED / "sl-modern.js")
         atomic_copy(LOCAL_REPORT, PUBLISHED / "cve-v3-public.json")
+        remove_legacy_potential_views(PUBLISHED)
 
     yaml = overlay_yaml(target)
     if OVERRIDE.exists() and OVERRIDE.read_text() != yaml:
