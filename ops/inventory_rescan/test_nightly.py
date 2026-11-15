@@ -100,6 +100,17 @@ class NightlyTests(unittest.TestCase):
                     "has_next":page*100<len(ips)}
         self.assertEqual(set(nightly.inventory(cfg,fetch)),set(ips))
 
+    def test_passive_only_ip_also_in_inventory(self):
+        cfg=config()
+        def fetch(url):
+            return {"page":1,"total":1,"hosts":[{"ip":"185.220.213.51"}],
+                    "has_next":False,"passive_total":2,
+                    "passive_intelligence":[
+                        {"ip":"185.220.213.52","record_type":"rdap"},
+                        {"ip":"","network":"185.220.212.0/22"}]}
+        got=nightly.inventory(cfg,fetch)
+        self.assertEqual(set(got),{"185.220.213.51","185.220.213.52"})
+
     def test_reject_unbounded_scope(self):
         import tempfile, json, pathlib
         with tempfile.TemporaryDirectory() as folder:
