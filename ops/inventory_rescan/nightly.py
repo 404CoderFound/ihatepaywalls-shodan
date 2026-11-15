@@ -46,6 +46,9 @@ def load_config(path):
     if not isinstance(allowed, list) or not allowed:
         raise ValueError("authorized_cidrs must contain explicit approved ranges; nothing queued")
     cfg["_allowed"] = [ipaddress.ip_network(n, strict=True) for n in allowed]
+    if any((n.version == 4 and n.prefixlen < 8) or
+           (n.version == 6 and n.prefixlen < 32) for n in cfg["_allowed"]):
+        raise ValueError("scope too broad; explicitly authorize narrower CIDRs")
     if len(cfg["_allowed"]) > 500:
         raise ValueError("too many authorized ranges")
     # Supplement, never weaken, the scanner's own policy exclusions.
@@ -242,7 +245,11 @@ def main():
     if args.enqueue:
         Path(LOCK).parent.mkdir(parents=True,exist_ok=True)
         with open(LOCK,"a+") as lock:
-            fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print("Another inventory refresh is active; skipping.")
+                return
             run(cfg,enqueue=True)
     else:
         run(cfg)
