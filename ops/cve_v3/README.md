@@ -266,3 +266,23 @@ the underlying Docker secret, then force-recreate only the web service
 using BOTH the original Compose configuration and the existing V3 read-only
 override. Never post the new token or commit secrets to Git.
 
+
+### Legacy API compatibility and limits
+
+The publisher patches the staged copies of app.js and insights.js to stop
+the original views from showing unverified host correlations. These are
+narrow, idempotent edits to static files under the read-only Compose bind
+mount; they do not modify the original Docker image or database.
+
+The previous PostgreSQL API may still expose its historic
+potential_vulnerabilities and potential_host_matches research fields.
+Neither the revised host UI nor the strict V4 published report consumes
+or advertises those fields. Removing or changing old API response fields
+requires a separately reviewed production backend image deployment;
+it is deliberately not attempted as part of this static-only update.
+
+Long raw service banners are collapsed into expandable details. Host search,
+filter syntax, map functions and administrative workflow keep their original
+API contracts. If production app.js/insights.js changes incompatibly, the
+publisher fails closed rather than silently reintroducing speculative claims.
+
