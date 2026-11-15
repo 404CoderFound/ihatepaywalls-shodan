@@ -88,6 +88,24 @@ class CVEV3Tests(unittest.TestCase):
         self.assertIsNone(fingerprint.fingerprint({
             "banner":"Apache/2.4.58\nnginx/1.24.0","cpe":""
         }))
+    def test_read_only_overlay_contains_complete_static_mount(self):
+        yaml = publish.overlay_yaml("/srv/app/static")
+        self.assertIn("read_only: true", yaml)
+        self.assertIn("source: /var/lib/scanlattice-cve/site-v3-static", yaml)
+        self.assertIn("target: /srv/app/static", yaml)
+
+    def test_patched_index_is_idempotent(self):
+        html = """<!doctype html><html><body>
+          <section id="host-content"></section>
+          <section id="insight-content"></section>
+          <script src="/static/app.js" defer></script>
+          <script src="/static/insights.js" defer></script>
+          </body></html>"""
+        first = publish.patched_index(html)
+        self.assertEqual(first.count(publish.SCRIPT_TAG), 1)
+        self.assertEqual(first, publish.patched_index(first))
+        self.assertIn('<script src="/static/cve-v3.js" defer></script>', first)
+
     def test_publisher_checks_actual_dom_not_nav_text(self):
         html = """<!doctype html><html><body>
           <section id="host-content"></section>
