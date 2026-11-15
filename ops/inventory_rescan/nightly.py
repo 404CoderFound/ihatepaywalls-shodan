@@ -148,7 +148,7 @@ def history(jobs, profile, when):
             raise RuntimeError("unexpected scanner job record")
         req = job.get("request") or {}
         status = job.get("status", "")
-        if status in BUSY:
+        if status in BUSY and status != "scheduled":
             pending += 1
         if req.get("target_type") != "ip" or req.get("ports") != profile:
             continue
@@ -170,6 +170,9 @@ def history(jobs, profile, when):
 
 def run(cfg, enqueue=False, fetch=http_json, call=scanner, now=None):
     now = now or clock()
+    if enqueue and not cfg["night_start_utc"] <= now.hour < cfg["night_end_utc"]:
+        print("Outside UTC nighttime window; no scans queued.")
+        return 0
     ips = inventory(cfg, fetch=fetch)
     approved = [ip for ip in ips if permitted(ip,cfg)]
     jobs_response = call(["jobs"], cfg.get("scanner_bin","/usr/local/bin/scanlattice-v3"))
