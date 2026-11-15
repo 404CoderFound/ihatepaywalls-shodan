@@ -30,7 +30,7 @@ if command -v node >/dev/null 2>&1; then node --check "$ROOT/cve-v3.js"; fi
 install -d -m 0755 "$DEST"
 install -m 0644 "$ROOT/vendor_oval.py" "$ROOT/merge_report.py" \
   "$ROOT/doctor.py" "$ROOT/publish.py" "$ROOT/fingerprint.py" "$ROOT/vendor_import.py" \
-  "$ROOT/cve-v3.js" "$DEST/"
+  "$ROOT/cve-v3.js" "$ROOT/site-clean.css" "$DEST/"
 install -m 0755 "$ROOT/reconcile.sh" "$DEST/reconcile.sh"
 install -d -m 0700 /var/lib/scanlattice-cve/vendor \
   /var/lib/scanlattice-cve/site-v3-backups
