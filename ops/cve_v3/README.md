@@ -5,6 +5,30 @@ production installation. GitHub's default application tree and Docker Compose
 files are NOT identical to production. Never replace the production Compose
 stack with the GitHub default.
 
+### Read-only Docker rootfs: production-compatible publication
+
+The publisher DOES NOT copy files into the running Docker rootfs (which is
+read-only). It copies the entire original static directory to
+/var/lib/scanlattice-cve/site-v3-static, adds a single script and JSON report,
+then creates /etc/scanlattice/v2-prodweb/cve-v3.readonly.override.yaml.
+A one-time Docker Compose recreation of the web service binds that entire
+host static directory as read-only. Other original volumes and services remain.
+The existing image stays scanlattice-prodweb:cve-bulk-v1.
+
+Reconciliation refreshes cve-v3-public.json atomically in that host directory
+and does NOT recreate Docker every 20 minutes. Rollback uses the original
+Compose file only, recreating the web service without the V3 mount. No base
+Compose file, original Docker image, or PostgreSQL data is overwritten.
+
+Preflight: the publisher refuses to proceed when the running image differs
+from the original Compose image or when another existing mount occupies static/.
+It validates Compose config and the actual production DOM, and attempts an
+automatic rollback if the new website fails public health checks.
+
+The V3 static mount becomes the authoritative copy of the original website
+assets. After a future production image update, rebuild the static staging
+directory from the newly deployed image before re-enabling V3.
+
 The package covers:
 1. Ubuntu Canonical USN OVAL local package verification and conservative
    merging with NVD CPE signals.
@@ -54,8 +78,8 @@ curl -fsS https://scanlattice.plezi.eu/static/cve-v3-public.json | head -c 500
 ~~~
 
 Open the website's existing Vulnerabilities tab and the indexed host page.
-Only after the main V3 panel works, remove the old temporary standalone
-Explorer with the guarded command:
+Only after visually confirming the main V3 panel works, remove the old
+temporary standalone Explorer with the guarded command:
 
 ~~~bash
 sudo scanlattice-cve-v3 publish retire-explorer
