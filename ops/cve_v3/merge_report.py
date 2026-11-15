@@ -98,10 +98,13 @@ def combine(report, vendor, catalog):
         if cve not in catalog: continue
         status=entry.get("status")
         if status not in ("potential","needs_evidence"):continue
+        # A remote CPE match is a research signal, not a host vulnerability.
+        # Never put it in the same category as a locally evaluated package.
+        review_status = "research_candidate" if status == "potential" else "needs_evidence"
         by_pair[(ip,cve)]={
-            "ip":ip,"cve":cve,"status":status,
-            "evidence":"NVD configuration vs remote service fingerprint",
-            "note":"Not a verified vulnerability; OS backports and packages unknown",
+            "ip":ip,"cve":cve,"status":review_status,
+            "evidence":"Unverified NVD software/version correlation",
+            "note":"NOT evidence of an affected host. Installed components, configuration, platform, distro backports and patches have not been verified.",
         }
 
     # Verified local vendor evaluation supersedes weak remote inference.
@@ -128,7 +131,7 @@ def combine(report, vendor, catalog):
             elif status=="vendor_unknown" and pair in by_pair:
                 by_pair[pair]["status"]="needs_evidence"
                 by_pair[pair]["note"]="OpenSCAP could not establish package applicability"
-    rank={"vendor_affected":0,"potential":1,"needs_evidence":2}
+    rank={"vendor_affected":0,"research_candidate":1,"needs_evidence":2}
     rows=sorted(by_pair.values(),key=lambda x:(rank.get(x["status"],9),x["ip"],x["cve"]))
     for row in rows:
         meta=catalog[row["cve"]]
@@ -141,13 +144,13 @@ def combine(report, vendor, catalog):
         "schema_version":1,
         "generated_at":now().isoformat(timespec="seconds"),
         "v2_assessed_at":report.get("generated_at"),
-        "source":"ScanLattice CVE V2 NVD + optional local Ubuntu OVAL",
+        "source":"ScanLattice CVE V2 NVD research candidates + optional local Ubuntu OVAL",
         "hosts_assessed":len(checked_hosts),
         "vendor_hosts":len(vendor),
         "v2_fingerprinted_services":report.get("fingerprinted_services",0),
         "vendor_suppressed_remote_signals":suppressed,
         "counts":dict(counts),
-        "status_note":"Remote CVE correlations are POTENTIAL. Vendor-affected requires authenticated local OVAL results. Vendor-false means not affected by that test, not necessarily patched.",
+        "status_note":"Only vendor_affected means the local Ubuntu package evaluation reported affected. research_candidate and needs_evidence are NOT host vulnerabilities. Vendor-false means not affected by that test, not necessarily patched.",
         "findings":rows,
     }
 
