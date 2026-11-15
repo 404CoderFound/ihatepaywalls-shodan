@@ -8,7 +8,6 @@ NOW = datetime(2026,11,15,2,30,tzinfo=timezone.utc)
 def config():
     return {
         "_website":"https://scanlattice.plezi.eu",
-        "_allowed":[ipaddress.ip_network("185.220.213.0/24")],
         "_excluded":[],
         "ports":"extended",
         "max_inventory_hosts":1000,
@@ -42,7 +41,7 @@ class NightlyTests(unittest.TestCase):
         self.assertEqual(submitted,0)
         self.assertEqual(calls,[["jobs"]])
 
-    def test_all_indexed_authorized_hosts_queued(self):
+    def test_all_indexed_public_hosts_queued(self):
         cfg=config()
         go_calls=[]
         def go(args,binary):
@@ -57,9 +56,9 @@ class NightlyTests(unittest.TestCase):
         self.assertEqual(n,2)
         self.assertEqual(sum(x[0]=="scan" for x in go_calls),2)
 
-    def test_inventory_is_not_authorization(self):
+    def test_public_indexed_targets_respect_exclusions(self):
         cfg=config()
-        self.assertFalse(nightly.permitted("1.1.1.1",cfg))
+        self.assertTrue(nightly.permitted("1.1.1.1",cfg))
         self.assertFalse(nightly.permitted("192.168.0.9",cfg))
         self.assertTrue(nightly.permitted("185.220.213.51",cfg))
         cfg["_excluded"].append(ipaddress.ip_network("185.220.213.0/24"))
@@ -111,7 +110,7 @@ class NightlyTests(unittest.TestCase):
         got=nightly.inventory(cfg,fetch)
         self.assertEqual(set(got),{"185.220.213.51","185.220.213.52"})
 
-    def test_reject_unbounded_scope(self):
+    def test_config_requires_no_cidr_list(self):
         import tempfile, json, pathlib
         with tempfile.TemporaryDirectory() as folder:
             root=pathlib.Path(folder)
@@ -121,14 +120,14 @@ class NightlyTests(unittest.TestCase):
             cfg.write_text(json.dumps({
                 "website_url":"https://scanlattice.plezi.eu",
                 "scanner_config":str(scanner),
-                "authorized_cidrs":["0.0.0.0/0"],
                 "ports":"extended","max_inventory_hosts":100,
                 "max_jobs_per_tick":1,"max_pending_jobs":1,
                 "max_jobs_per_night":1,"max_checks_per_night":100,
                 "cooldown_hours":24,"night_start_utc":0,"night_end_utc":5
             }))
-            with self.assertRaises(ValueError):
-                nightly.load_config(cfg)
+            loaded=nightly.load_config(cfg)
+            self.assertTrue(nightly.permitted("1.1.1.1",loaded))
+            self.assertFalse(nightly.permitted("192.168.0.9",loaded))
 
     def test_atomic_go_job_files_are_read(self):
         import tempfile, json, pathlib
