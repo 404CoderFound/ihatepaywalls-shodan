@@ -30,10 +30,13 @@ LOCAL_REPORT = Path("/var/lib/scanlattice-cve/cve-v3-public.json")
 BACKUPS = Path("/var/lib/scanlattice-cve/site-v3-backups")
 PUBLISHED = Path("/var/lib/scanlattice-cve/site-v3-static")
 SCRIPT = Path("/usr/local/lib/scanlattice/cve_v3/cve-v3.js")
+STYLE = Path("/usr/local/lib/scanlattice/cve_v3/site-clean.css")
 SCRIPT_TAG = '<script src="/static/cve-v3.js" defer></script>'
+STYLE_TAG = '<link rel="stylesheet" href="/static/site-clean.css">'
 IMAGE = "scanlattice-prodweb:cve-bulk-v1"
 BASE_HEALTH = "https://scanlattice.plezi.eu/api/health"
 JS_URL = "https://scanlattice.plezi.eu/static/cve-v3.js"
+CSS_URL = "https://scanlattice.plezi.eu/static/site-clean.css"
 REPORT_URL = "https://scanlattice.plezi.eu/static/cve-v3-public.json"
 
 
@@ -86,6 +89,14 @@ def validate_ui(html):
 
 def patched_index(html):
     validate_ui(html)
+    if STYLE_TAG not in html:
+        if html.lower().count("</head>") == 1:
+            html = re.sub(r"</head>", STYLE_TAG + "</head>", html,
+                          count=1, flags=re.IGNORECASE)
+        else:
+            # Allow minimal test fixtures without a head; production has one.
+            html = re.sub(r"</body>", STYLE_TAG + "</body>", html,
+                          count=1, flags=re.IGNORECASE)
     if SCRIPT_TAG not in html:
         if html.lower().count("</body>") != 1:
             raise RuntimeError("Cannot insert V3 script into this HTML")
@@ -113,7 +124,7 @@ def atomic_copy(source, destination):
 
 
 def checked_report():
-    if not SCRIPT.is_file() or not LOCAL_REPORT.is_file():
+    if not SCRIPT.is_file() or not STYLE.is_file() or not LOCAL_REPORT.is_file():
         raise RuntimeError("Missing V3 script/report. Run V3 assess/merge first.")
     data = json.loads(LOCAL_REPORT.read_text())
     if data.get("schema_version") != 1 or not isinstance(data.get("findings"), list):
@@ -151,7 +162,7 @@ def health_check():
     # Retry the real public endpoints before considering rollback.
     for attempt in range(10):
         try:
-            for url in (BASE_HEALTH, JS_URL, REPORT_URL):
+            for url in (BASE_HEALTH, JS_URL, CSS_URL, REPORT_URL):
                 request = urllib.request.Request(
                     url, headers={"Cache-Control": "no-cache",
                                   "User-Agent": "ScanLattice-V3-Publisher/2.0"})
@@ -159,6 +170,8 @@ def health_check():
                     body = response.read(15_000_000 + 1)
                     if response.status != 200:
                         raise RuntimeError("Public endpoint unhealthy: " + url)
+                if url == CSS_URL and b"ScanLattice Clean Navigation V4" not in body:
+                    raise RuntimeError("Public clean UI CSS mismatch")
                 if url == JS_URL and b"ScanLattice V3" not in body:
                     raise RuntimeError("Public CVE V3 JS mismatch")
                 if url == REPORT_URL:
@@ -220,6 +233,7 @@ def prepare_static():
                 docker("cp", f"{CONTAINER}:{target}/index.html",
                        str(BACKUPS / "index.html"))
             atomic_copy(SCRIPT, tmp / "cve-v3.js")
+            atomic_copy(STYLE, tmp / "site-clean.css")
             atomic_copy(LOCAL_REPORT, tmp / "cve-v3-public.json")
             os.rename(tmp, PUBLISHED)
         except Exception:
@@ -234,6 +248,7 @@ def prepare_static():
         atomic_bytes(PUBLISHED / "index.html",
                      patched_index((PUBLISHED / "index.html").read_text()).encode())
         atomic_copy(SCRIPT, PUBLISHED / "cve-v3.js")
+        atomic_copy(STYLE, PUBLISHED / "site-clean.css")
         atomic_copy(LOCAL_REPORT, PUBLISHED / "cve-v3-public.json")
 
     yaml = overlay_yaml(target)
