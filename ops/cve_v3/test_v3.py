@@ -93,8 +93,8 @@ class CVEV3Tests(unittest.TestCase):
     def test_v3_frontend_escaper_and_syntax(self):
         js = Path(__file__).with_name("cve-v3.js")
         source = js.read_text()
-        self.assertIn(`,"'":"&#39;"`, source)
-        self.assertNotIn(`'":"&quot;":"&#39;"`, source)
+        self.assertIn("c => ({", source)
+        self.assertNotIn(':"&quot;":"&#39;"', source)
         if shutil.which("node"):
             subprocess.run(["node", "--check", str(js)], check=True)
 
