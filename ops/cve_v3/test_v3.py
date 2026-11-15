@@ -49,33 +49,47 @@ class CVEV3Tests(unittest.TestCase):
             self.assertEqual(merged["CVE-2024-38472"],"vendor_not_affected")
             self.assertEqual(merged["CVE-2024-12345"],"vendor_affected")
 
-    def test_remote_nvd_matches_remain_research_only(self):
+    def test_remote_nvd_matches_are_never_published(self):
         result=merge_report.combine(
             {"generated_at":"2026-11-15T20:00:00+00:00",
-             "fingerprinted_services":1,"findings":[APACHE]},
+             "hosts_checked":1,"fingerprinted_services":1,"findings":[APACHE]},
             {},meta("CVE-2024-38472"))
-        self.assertEqual(result["counts"]["research_candidate"],1)
-        self.assertNotIn("potential",result["counts"])
-        self.assertEqual(result["findings"][0]["status"],"research_candidate")
-        self.assertIn("NOT evidence",result["findings"][0]["note"])
-        self.assertNotIn("vendor_affected",result["counts"])
+        self.assertEqual(result["findings"],[])
+        self.assertEqual(result["counts"],{"confirmed":0})
+        self.assertEqual(result["unverified_signals_excluded"],1)
 
-    def test_ubuntu_false_suppresses_unverified_remote(self):
+    def test_negative_vendor_rule_does_not_confirm_a_host(self):
         host=vendor(statuses={"CVE-2024-38472":"vendor_not_affected"})
-        report={"generated_at":"2026-11-15T20:00:00+00:00",
-                "fingerprinted_services":3,"findings":[APACHE]}
-        merged=merge_report.combine(report,{host["ip"]:host},
-                                    meta("CVE-2024-38472"))
-        self.assertEqual(merged["findings"],[])
-        self.assertEqual(merged["vendor_suppressed_remote_signals"],1)
+        result=merge_report.combine(
+            {"findings":[APACHE]}, {host["ip"]:host},
+            meta("CVE-2024-38472"))
+        self.assertEqual(result["counts"]["confirmed"],0)
+        self.assertEqual(result["unverified_signals_excluded"],1)
 
-    def test_vendor_true_adds_affected_without_remote_fingerprint(self):
+    def test_positive_vendor_rule_without_review_does_not_confirm(self):
         host=vendor(statuses={"CVE-2024-12345":"vendor_affected"})
-        report={"generated_at":"2026-11-15T20:00:00+00:00",
-                "fingerprinted_services":0,"findings":[]}
-        merged=merge_report.combine(report,{host["ip"]:host},
-                                    meta("CVE-2024-12345"))
-        self.assertEqual(merged["findings"][0]["status"],"vendor_affected")
+        result=merge_report.combine(
+            {"findings":[]},{host["ip"]:host},
+            meta("CVE-2024-12345"))
+        self.assertEqual(result["findings"],[])
+
+    def test_separately_reviewed_local_package_evidence_required(self):
+        host=vendor(statuses={"CVE-2024-12345":"vendor_affected"})
+        item={"schema_version":1,"ip":host["ip"],"cve":"CVE-2024-12345",
+              "status":"confirmed","component_present":True,
+              "affected_configuration_verified":True,
+              "unpatched_installed_package_verified":True,
+              "reviewer":"System administrator","evidence_reference":"LOCAL-EVIDENCE-123",
+              "verification_method":"Authenticated package and configuration assessment",
+              "verified_at":datetime.now(timezone.utc).isoformat()}
+        result=merge_report.combine({"findings":[]},{host["ip"]:host},
+            meta("CVE-2024-12345"),{(host["ip"],"CVE-2024-12345"):item})
+        self.assertEqual(result["counts"]["confirmed"],1)
+        self.assertEqual(result["findings"][0]["status"],"confirmed")
+        item["affected_configuration_verified"]=False
+        result=merge_report.combine({"findings":[]},{host["ip"]:host},
+            meta("CVE-2024-12345"),{(host["ip"],"CVE-2024-12345"):item})
+        self.assertEqual(result["findings"],[])
 
     def test_expired_vendor_evidence_not_accepted(self):
         item=vendor()
