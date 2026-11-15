@@ -90,10 +90,13 @@ def inventory(cfg, fetch=http_json):
     ips = set()
     page = 1
     original_total = None
+    first_page = None
     while True:
         query = urllib.parse.urlencode({
             "q": "", "sort": "ip", "limit": 100, "page": page})
         data = fetch(cfg["_website"] + "/api/search?" + query)
+        if first_page is None:
+            first_page = data
         total = data.get("total")
         rows = data.get("hosts", data.get("results"))
         if not isinstance(total,int) or total < 0 or not isinstance(rows,list):
@@ -120,7 +123,40 @@ def inventory(cfg, fetch=http_json):
         if page > (cfg["max_inventory_hosts"] + 99) // 100 + 1:
             raise RuntimeError("inventory pagination never ended")
     if len(ips) != original_total:
-        raise RuntimeError("inventory incomplete or changed; no jobs submitted")
+        raise RuntimeError("indexed-host inventory incomplete or changed")
+
+    # Website /api/stats counts passive-only IPs too. Iterate every metadata
+    # page and include only explicit, valid IP addresses (never CIDR blocks).
+    passive_total = first_page.get("passive_total", 0) if first_page else 0
+    if not isinstance(passive_total, int) or passive_total < 0:
+        raise RuntimeError("invalid passive inventory total")
+    if passive_total > cfg["max_inventory_hosts"]:
+        raise RuntimeError("passive inventory too large to review in one run")
+    for metadata_page in range(1, (passive_total + 24) // 25 + 1):
+        if metadata_page == 1:
+            data = first_page
+        else:
+            query = urllib.parse.urlencode({
+                "q": "", "sort": "ip", "limit": 100, "page": 1,
+                "metadata_page": metadata_page})
+            data = fetch(cfg["_website"] + "/api/search?" + query)
+        if data.get("passive_total", 0) != passive_total:
+            raise RuntimeError("passive inventory changed during paging")
+        records = data.get("passive_intelligence", [])
+        if not isinstance(records, list):
+            raise RuntimeError("invalid passive records response")
+        for record in records:
+            if not isinstance(record, dict):
+                raise RuntimeError("invalid passive record")
+            raw = record.get("ip") or ""
+            if not raw:
+                continue
+            try:
+                ips.add(str(ipaddress.ip_address(raw)))
+            except ValueError as exc:
+                raise RuntimeError("invalid passive IP") from exc
+        if len(ips) > cfg["max_inventory_hosts"]:
+            raise RuntimeError("combined IP inventory exceeds limit; no jobs submitted")
     return sorted(ips, key=lambda s: (ipaddress.ip_address(s).version,
                                       int(ipaddress.ip_address(s))))
 
