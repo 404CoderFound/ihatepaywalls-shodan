@@ -9,6 +9,9 @@ CODE=/usr/local/lib/scanlattice/cve_v3
 CID=scanlattice-v2-prodweb-web-1
 docker inspect "$CID" >/dev/null
 
+echo "Importing fresh authenticated-host OVAL evidence"
+python3 "$CODE/vendor_import.py"
+
 echo "Enriching only explicitly versioned services (existing CPEs untouched)"
 docker exec -e APPLY=1 -i "$CID" python - < "$CODE/fingerprint.py"
 
