@@ -34,7 +34,11 @@ install -d -m 0755 "$DEST"
 install -d -m 0700 /var/lib/scanlattice-cve
 install -m 0644 "$ROOT/applicability.py" "$DEST/applicability.py"
 install -m 0755 "$ROOT/runner.py" "$DEST/runner.py"
-ln -sfn "$DEST/runner.py" /usr/local/sbin/scanlattice-cve-v2
+cat > /usr/local/sbin/scanlattice-cve-v2 <<'EOF'
+#!/bin/sh
+exec /usr/bin/python3 /usr/local/lib/scanlattice/cve_v2/runner.py "$@"
+EOF
+chmod 0755 /usr/local/sbin/scanlattice-cve-v2
 
 cat > /etc/systemd/system/scanlattice-cve-v2-refresh.service <<'EOF'
 [Unit]
