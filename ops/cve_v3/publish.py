@@ -209,7 +209,7 @@ def health_check():
                     body = response.read(15_000_000 + 1)
                     if response.status != 200:
                         raise RuntimeError("Public endpoint unhealthy: " + url)
-                if url == JS_URL and b"ScanLattice V3" not in body:
+                if url == JS_URL and b"ScanLattice V4" not in body:
                     raise RuntimeError("Public CVE V3 JS mismatch")
                 if url == MODERN_CSS_URL and b".sl-modern" not in body:
                     raise RuntimeError("Modern stylesheet unavailable")
