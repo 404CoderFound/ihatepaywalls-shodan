@@ -1,4 +1,6 @@
 import json
+import shutil
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -88,6 +90,14 @@ class CVEV3Tests(unittest.TestCase):
         self.assertIsNone(fingerprint.fingerprint({
             "banner":"Apache/2.4.58\nnginx/1.24.0","cpe":""
         }))
+    def test_v3_frontend_escaper_and_syntax(self):
+        js = Path(__file__).with_name("cve-v3.js")
+        source = js.read_text()
+        self.assertIn(`,"'":"&#39;"`, source)
+        self.assertNotIn(`'":"&quot;":"&#39;"`, source)
+        if shutil.which("node"):
+            subprocess.run(["node", "--check", str(js)], check=True)
+
     def test_read_only_overlay_contains_complete_static_mount(self):
         yaml = publish.overlay_yaml("/srv/app/static")
         self.assertIn("read_only: true", yaml)
