@@ -131,6 +131,20 @@ class CVEV3Tests(unittest.TestCase):
         self.assertIn(".sl-modern .sl-cve-results",css)
         self.assertIn("@media(max-width:760px)",css)
 
+    def test_staged_legacy_views_are_suppressed_idempotently(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            app=root/"app.js"
+            insights=root/"insights.js"
+            app.write_text('const potential=(data.potential_vulnerabilities||[]).map(v=>v.cve);')
+            insights.write_text('async function show(path) {\n  return path;\n}')
+            publish.remove_legacy_potential_views(root)
+            self.assertIn('const potential=([]).map',app.read_text())
+            self.assertIn('ScanLattice verified-only CVE route',insights.read_text())
+            old=(app.read_text(),insights.read_text())
+            publish.remove_legacy_potential_views(root)
+            self.assertEqual(old,(app.read_text(),insights.read_text()))
+
     def test_read_only_overlay_contains_complete_static_mount(self):
         yaml = publish.overlay_yaml("/srv/app/static")
         self.assertIn("read_only: true", yaml)
