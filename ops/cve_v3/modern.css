@@ -115,6 +115,14 @@ body.sl-modern{background:var(--bg);color:var(--ink);
  background:#f8fafc;margin:7px 0;padding:11px}
 .sl-modern .observation pre,.sl-modern .docs pre{background:#f7f9fc;
  border:1px solid #e8edf3;border-radius:8px;color:#495e76;white-space:pre-wrap}
+.sl-modern .sl-raw-banner{background:#f8fafc;border:1px solid #e7edf5;border-radius:7px;
+ margin:11px 0;overflow:hidden}
+.sl-modern .sl-raw-banner>summary{padding:10px 13px;cursor:pointer;font:650 12px var(--mono);
+ color:#50657e;list-style:revert}
+.sl-modern .sl-raw-banner>summary:hover{background:#edf3f9}
+.sl-modern .sl-raw-banner>pre{margin:0!important;border:0!important;
+ border-top:1px solid #e4eaf1!important;border-radius:0!important;
+ max-height:330px;overflow:auto}
 .sl-modern .hostcontent{padding:0 0 60px}
 .sl-modern .hostmeta{background:#fff;border:1px solid var(--rule);
  border-radius:11px;overflow:hidden;gap:0}
