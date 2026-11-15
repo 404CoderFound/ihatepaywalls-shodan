@@ -34,6 +34,10 @@ install -m 0644 "$ROOT/vendor_oval.py" "$ROOT/merge_report.py" \
 install -m 0755 "$ROOT/reconcile.sh" "$DEST/reconcile.sh"
 install -d -m 0700 /var/lib/scanlattice-cve/vendor \
   /var/lib/scanlattice-cve/site-v3-backups
+if id -u ihatepaywalls >/dev/null 2>&1; then
+  install -d -o ihatepaywalls -g ihatepaywalls -m 0700 \
+    /home/ihatepaywalls/scanlattice-vendor-inbox
+fi
 
 cat >/usr/local/sbin/scanlattice-cve-v3 <<'EOF'
 #!/bin/sh
