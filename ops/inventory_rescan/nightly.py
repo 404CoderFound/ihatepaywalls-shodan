@@ -180,7 +180,10 @@ def read_jobs(cfg, call):
         return response.get("jobs")
     path = Path(directory) / "jobs"
     if not path.is_dir():
-        raise RuntimeError("scanner job directory unavailable: " + str(path))
+        # Scanner installations may use a custom state directory. Fall back to
+        # the documented CLI instead of blocking the initial inventory preview.
+        response = call(["jobs"], cfg.get("scanner_bin","/usr/local/bin/scanlattice-v3"))
+        return response.get("jobs")
     jobs = []
     for i, entry in enumerate(path.glob("*.json")):
         if i >= 100000:
