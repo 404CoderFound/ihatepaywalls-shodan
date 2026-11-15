@@ -7,6 +7,7 @@ patching the current container. Re-run after container recreation.
 from __future__ import annotations
 import argparse
 import json
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -51,6 +52,45 @@ def verify_public():
     if result.get("schema_version")!=1 or not isinstance(result.get("findings"),list):
         raise RuntimeError("Public V3 report is invalid")
 
+def ui_features(html):
+    """Check actual DOM targets used by app.js and cve-v3.js.
+
+    Do not require nav text or a page-host marker: production templates may
+    omit/rename those while keeping the same host and insight containers.
+    """
+    def has_id(name):
+        pattern = r"""\\bid\\s*=\\s*([\\"'])""" + re.escape(name) + r"""\\1"""
+        return bool(re.search(pattern, html, re.IGNORECASE))
+    return {
+        "host-content": has_id("host-content"),
+        "insight-content": has_id("insight-content"),
+        "app.js": bool(re.search(r"<script\\b[^>]+\\bapp\\.js(?:\\?[^\\"']*)?[\\"']", html, re.I)),
+        "insights.js": bool(re.search(r"<script\\b[^>]+\\binsights\\.js(?:\\?[^\\"']*)?[\\"']", html, re.I)),
+        "body-close": html.lower().count("</body>") == 1,
+    }
+
+
+def validate_ui(html):
+    features = ui_features(html)
+    missing = [name for name, value in features.items() if not value]
+    if missing:
+        raise RuntimeError(
+            "Production UI missing required V3 targets: " + ", ".join(missing)
+            + ". No site files modified."
+        )
+    return features
+
+
+def inspect_ui():
+    with tempfile.TemporaryDirectory() as temporary:
+        local = Path(temporary) / "index.html"
+        cp_from(f"{static_dir()}/index.html", local)
+        html = local.read_text()
+        print(json.dumps(ui_features(html), indent=2))
+        validate_ui(html)
+        print("Production DOM compatible with CVE V3 overlay.")
+
+
 def deploy(retire=False):
     if not SCRIPT.is_file() or not LOCAL_REPORT.is_file():
         raise RuntimeError("Missing V3 script/report. Run reconcile first.")
@@ -65,8 +105,7 @@ def deploy(retire=False):
         live=tmp/"index.html"
         cp_from(f"{target}/index.html",live)
         html=live.read_text()
-        if "page-host" not in html or "data-page=\"vulnerabilities\"" not in html:
-            raise RuntimeError("Unknown production main UI structure, refusing to patch")
+        validate_ui(html)
         if SCRIPT_TAG not in html:
             if html.count("</body>")!=1:
                 raise RuntimeError("Unexpected index.html body; no modifications made")
@@ -102,9 +141,10 @@ def rollback():
 
 def main():
     p=argparse.ArgumentParser()
-    p.add_argument("command",choices=["install","retire-explorer","rollback"])
+    p.add_argument("command",choices=["inspect","install","retire-explorer","rollback"])
     a=p.parse_args()
-    if a.command=="rollback":rollback()
+    if a.command=="inspect":inspect_ui()
+    elif a.command=="rollback":rollback()
     else:deploy(retire=a.command=="retire-explorer")
 
 if __name__=="__main__":main()
