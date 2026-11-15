@@ -2,7 +2,6 @@
   "website_url": "https://scanlattice.plezi.eu",
   "scanner_config": "/etc/scanlattice-v3/config.json",
   "scanner_bin": "/usr/local/bin/scanlattice-v3",
-  "authorized_cidrs": [],
   "ports": "extended",
   "max_inventory_hosts": 5000,
   "max_jobs_per_tick": 3,
