@@ -55,6 +55,7 @@ def load_config(path):
     scanner = json.loads(Path(cfg.get("scanner_config", "/etc/scanlattice-v3/config.json")).read_text())
     cfg["_excluded"] = [ipaddress.ip_network(n, strict=False)
                         for n in scanner.get("excluded_cidrs", [])]
+    cfg["_scanner_state_dir"] = scanner.get("state_dir", "/var/lib/scanlattice-v3")
     profile = cfg.get("ports", "extended")
     if profile not in ("quick", "standard", "extended", "all-tcp"):
         raise ValueError("invalid ports profile")
@@ -140,6 +141,27 @@ def scanner(args, binary="/usr/local/bin/scanlattice-v3"):
     except json.JSONDecodeError as exc:
         raise RuntimeError("unexpected Go scanner response") from exc
 
+def read_jobs(cfg, call):
+    """Read the v3.2 atomic job files; avoids huge Go /jobs replies for all-TCP jobs.
+
+    The CLI is retained as a fallback for test harnesses and other deployments.
+    """
+    directory = cfg.get("_scanner_state_dir")
+    if not directory:
+        response = call(["jobs"], cfg.get("scanner_bin","/usr/local/bin/scanlattice-v3"))
+        return response.get("jobs")
+    path = Path(directory) / "jobs"
+    if not path.is_dir():
+        raise RuntimeError("scanner job directory unavailable: " + str(path))
+    jobs = []
+    for i, entry in enumerate(path.glob("*.json")):
+        if i >= 100000:
+            raise RuntimeError("too many scanner job records")
+        if entry.stat().st_size > 2 * 1024 * 1024:
+            raise RuntimeError("scanner job file too large: " + entry.name)
+        jobs.append(json.loads(entry.read_text()))
+    return jobs
+
 def history(jobs, profile, when):
     recent = {}
     busy = set()
@@ -178,8 +200,7 @@ def run(cfg, enqueue=False, fetch=http_json, call=scanner, now=None):
         return 0
     ips = inventory(cfg, fetch=fetch)
     approved = [ip for ip in ips if permitted(ip,cfg)]
-    jobs_response = call(["jobs"], cfg.get("scanner_bin","/usr/local/bin/scanlattice-v3"))
-    jobs = jobs_response.get("jobs")
+    jobs = read_jobs(cfg, call)
     if not isinstance(jobs,list):
         raise RuntimeError("invalid scanner jobs response")
     recent, busy, pending, nightly_jobs, nightly_checks = history(
