@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta
 import fingerprint
 import merge_report
 import vendor_oval
+import verify_ingestion
 
 APACHE={"cve":"CVE-2024-38472","ip":"185.220.213.51",
         "status":"potential","evidence":"remote"}
@@ -86,6 +87,17 @@ class CVEV3Tests(unittest.TestCase):
         self.assertIsNone(fingerprint.fingerprint({
             "banner":"Apache/2.4.58\nnginx/1.24.0","cpe":""
         }))
+    def test_recent_completed_job_is_visible_on_website(self):
+        recent=(datetime.now(timezone.utc)-timedelta(hours=1)).isoformat()
+        job={"status":"completed","created_at":recent,
+             "request":{"target_type":"ip","target":"185.220.213.51"}}
+        count,fail=verify_ingestion.audit(
+            [job],lambda ip:{"host":{"last_scan_at":datetime.now(timezone.utc).isoformat()}})
+        self.assertEqual(count,1)
+        self.assertEqual(fail,[])
+        count,fail=verify_ingestion.audit([job],lambda ip:{"host":{"last_scan_at":""}})
+        self.assertEqual(len(fail),1)
+
     def test_existing_cpe_not_overwritten(self):
         self.assertIsNone(fingerprint.fingerprint({
             "banner":"nginx/1.25.0","cpe":"cpe:2.3:a:nginx:nginx:1.24.0:*:*:*:*:*:*:*"
