@@ -118,7 +118,7 @@ class CVEV3Tests(unittest.TestCase):
     def test_v3_frontend_escaper_and_syntax(self):
         js = Path(__file__).with_name("cve-v3.js")
         source = js.read_text()
-        self.assertIn("c => ({", source)
+        self.assertIn("&#39;", source)
         self.assertNotIn(':"&quot;":"&#39;"', source)
         if shutil.which("node"):
             subprocess.run(["node", "--check", str(js)], check=True)
@@ -130,7 +130,7 @@ class CVEV3Tests(unittest.TestCase):
         self.assertIn("target: /srv/app/static", yaml)
 
     def test_patched_index_is_idempotent(self):
-        html = """<!doctype html><html><body>
+        html = """<!doctype html><html><head></head><body>
           <section id="host-content"></section>
           <section id="insight-content"></section>
           <script src="/static/app.js" defer></script>
@@ -140,6 +140,8 @@ class CVEV3Tests(unittest.TestCase):
         self.assertEqual(first.count(publish.SCRIPT_TAG), 1)
         self.assertEqual(first, publish.patched_index(first))
         self.assertIn('<script src="/static/cve-v3.js" defer></script>', first)
+        self.assertIn('<link rel="stylesheet" href="/static/sl-modern.css">', first)
+        self.assertIn('<script src="/static/sl-modern.js" defer></script>', first)
 
     def test_publisher_checks_actual_dom_not_nav_text(self):
         html = """<!doctype html><html><body>
