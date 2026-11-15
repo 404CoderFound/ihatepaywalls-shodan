@@ -2,8 +2,28 @@
 /* ScanLattice: simplify navigation and make the existing search easier.
    All routes keep using the existing host/admin APIs, no extra permissions. */
 (() => {
+  function compactHostBanners(){
+    const root=document.getElementById("host-content");
+    if(!root)return;
+    for(const pre of root.querySelectorAll("article.observation > pre")){
+      if(pre.parentElement?.matches("details.sl-raw-banner"))continue;
+      const details=document.createElement("details");
+      details.className="sl-raw-banner";
+      const summary=document.createElement("summary");
+      summary.textContent="View raw banner";
+      pre.replaceWith(details);
+      details.append(summary,pre);
+    }
+  }
+  function watchHostBanners(){
+    const host=document.getElementById("host-content");
+    if(!host)return;
+    new MutationObserver(compactHostBanners).observe(host,{childList:true,subtree:true});
+    compactHostBanners();
+  }
   function setup(){
     document.body.classList.add("sl-modern");
+    watchHostBanners();
     const nav=document.querySelector(".mainnav nav");
     if(!nav||nav.dataset.slModern)return;
     nav.dataset.slModern="1";
