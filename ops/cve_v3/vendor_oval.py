@@ -49,7 +49,7 @@ def oval_results(path):
         if lname(item.tag) == "definition" and item.get("definition_id"):
             status = (item.get("result") or "").lower()
             if status in {"true", "false", "unknown", "error", "not evaluated", "not applicable"}:
-                output[item["definition_id"] if False else item.get("definition_id")] = status
+                output[item.get("definition_id")] = status
             item.clear()
     return output
 
