@@ -1,0 +1,15 @@
+{
+  "website_url": "https://scanlattice.plezi.eu",
+  "scanner_config": "/etc/scanlattice-v3/config.json",
+  "scanner_bin": "/usr/local/bin/scanlattice-v3",
+  "authorized_cidrs": [],
+  "ports": "extended",
+  "max_inventory_hosts": 5000,
+  "max_jobs_per_tick": 3,
+  "max_pending_jobs": 3,
+  "max_jobs_per_night": 100,
+  "max_checks_per_night": 12000,
+  "cooldown_hours": 24,
+  "night_start_utc": 0,
+  "night_end_utc": 5
+}
