@@ -82,75 +82,94 @@ with connection() as db:
             result[row["cve"]] = row
     return result
 
-def combine(report, vendor, catalog):
-    """Combine potential NVD signals and fresh Ubuntu OVAL package results.
-
-    A negative OVAL result does NOT prove a fixed patch; it only means the
-    vendor's local rule did not establish affectedness.
+def confirmation_is_sufficient(item, vendor_status, expected_ip, expected_cve):
+    """No automatic promotion: requires local package result AND reviewed
+    host-specific evidence. This is an evidence gate, never a claim of
+    mathematical certainty or a guarantee of exploitability.
     """
-    by_pair={}
-    checked_hosts=set()
-    for entry in report.get("findings", []):
-        ip=str(ipaddress.ip_address(entry["ip"]))
-        cve=entry["cve"].upper()
-        if not re.fullmatch(r"CVE-\d{4}-\d{4,}",cve):continue
-        checked_hosts.add(ip)
-        if cve not in catalog: continue
-        status=entry.get("status")
-        if status not in ("potential","needs_evidence"):continue
-        # A remote CPE match is a research signal, not a host vulnerability.
-        # Never put it in the same category as a locally evaluated package.
-        review_status = "research_candidate" if status == "potential" else "needs_evidence"
-        by_pair[(ip,cve)]={
-            "ip":ip,"cve":cve,"status":review_status,
-            "evidence":"Unverified NVD software/version correlation",
-            "note":"NOT evidence of an affected host. Installed components, configuration, platform, distro backports and patches have not been verified.",
-        }
+    if vendor_status != "vendor_affected" or not isinstance(item, dict):
+        return False
+    if item.get("schema_version") != 1:
+        return False
+    if item.get("ip") != expected_ip or item.get("cve") != expected_cve:
+        return False
+    if item.get("status") != "confirmed":
+        return False
+    for key in ("component_present", "affected_configuration_verified",
+                "unpatched_installed_package_verified"):
+        if item.get(key) is not True:
+            return False
+    if not all(isinstance(item.get(k),str) and len(item[k].strip()) >= 8
+               for k in ("reviewer", "evidence_reference", "verification_method")):
+        return False
+    checked_at = read_time(item.get("verified_at"))
+    return bool(checked_at and timedelta(0) <= now()-checked_at <= timedelta(hours=48))
 
-    # Verified local vendor evaluation supersedes weak remote inference.
-    # Allow a positive local vendor result even if no CPE was fingerprinted.
-    suppressed=0
-    for ip, payload in vendor.items():
-        checked_hosts.add(ip)
-        for cve,status in payload["cve_status"].items():
+
+def load_confirmations(directory):
+    """Opt-in reviewed attestations from a root-managed, non-web directory."""
+    confirmations={}
+    if not directory.is_dir():
+        return confirmations
+    for path in directory.glob("*.json"):
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 1_000_000:
+            continue
+        try:
+            row=json.loads(path.read_text())
+            ip=str(ipaddress.ip_address(row["ip"]))
+            cve=str(row["cve"]).upper()
+            if re.fullmatch(r"CVE-\d{4}-\d{4,}",cve):
+                confirmations[(ip,cve)] = row
+        except (OSError,ValueError,KeyError,TypeError):
+            continue
+    return confirmations
+
+
+def combine(report, vendor, catalog, confirmations=None):
+    """Public output contains ONLY host findings backed by two evidence gates.
+
+    1. Fresh authenticated on-host Canonical USN OVAL = affected package.
+    2. Separately reviewed proof of present component, vulnerable unpatched
+       installed package and applicable configuration.
+
+    In particular, never publish V2 remote CPE / NVD research candidates.
+    """
+    confirmations = confirmations or {}
+    rows=[]
+    suppressed_remote=len(report.get("findings", []))
+    for ip,payload in vendor.items():
+        for cve,local_status in payload.get("cve_status",{}).items():
             cve=cve.upper()
-            if cve not in catalog: continue
-            pair=(ip,cve)
-            if status=="vendor_not_affected":
-                if pair in by_pair:
-                    suppressed+=1
-                    del by_pair[pair]
-            elif status=="vendor_affected":
-                by_pair[pair]={
-                    "ip":ip,"cve":cve,"status":"vendor_affected",
-                    "evidence":"Canonical Ubuntu USN OVAL evaluated locally with OpenSCAP",
-                    "note":"Local vendor package rule returned affected; verify security impact",
-                    "vendor_checked_at":payload["generated_at"],
-                    "os_codename":payload.get("os_codename",""),
-                }
-            elif status=="vendor_unknown" and pair in by_pair:
-                by_pair[pair]["status"]="needs_evidence"
-                by_pair[pair]["note"]="OpenSCAP could not establish package applicability"
-    rank={"vendor_affected":0,"research_candidate":1,"needs_evidence":2}
-    rows=sorted(by_pair.values(),key=lambda x:(rank.get(x["status"],9),x["ip"],x["cve"]))
-    for row in rows:
-        meta=catalog[row["cve"]]
-        row.update(severity=(meta.get("severity") or "").upper(),
-                   cvss=meta.get("cvss"),
-                   known_exploited=bool(meta.get("known_exploited")),
-                   description=(meta.get("description") or "")[:300])
-    counts=Counter(row["status"] for row in rows)
+            if cve not in catalog:
+                continue
+            evidence=confirmations.get((ip,cve))
+            if not confirmation_is_sufficient(evidence, local_status, ip,cve):
+                continue
+            meta=catalog[cve]
+            rows.append({
+                "ip":ip, "cve":cve, "status":"confirmed",
+                "severity":(meta.get("severity") or "").upper(),
+                "cvss":meta.get("cvss"),
+                "known_exploited":bool(meta.get("known_exploited")),
+                "description":(meta.get("description") or "")[:300],
+                "evidence":"Local Ubuntu OpenSCAP plus separately reviewed host-specific evidence",
+                "verified_at":evidence["verified_at"],
+                "verification_method":evidence["verification_method"],
+                "evidence_reference":evidence["evidence_reference"],
+                "os_codename":payload.get("os_codename",""),
+            })
+    rows.sort(key=lambda x:(x["ip"],x["cve"]))
     return {
         "schema_version":1,
         "generated_at":now().isoformat(timespec="seconds"),
         "v2_assessed_at":report.get("generated_at"),
-        "source":"ScanLattice CVE V2 NVD research candidates + optional local Ubuntu OVAL",
-        "hosts_assessed":len(checked_hosts),
+        "source":"Strict verified-host evidence; remote CPE correlations excluded",
+        "hosts_assessed":report.get("hosts_checked",0),
         "vendor_hosts":len(vendor),
         "v2_fingerprinted_services":report.get("fingerprinted_services",0),
-        "vendor_suppressed_remote_signals":suppressed,
-        "counts":dict(counts),
-        "status_note":"Only vendor_affected means the local Ubuntu package evaluation reported affected. research_candidate and needs_evidence are NOT host vulnerabilities. Vendor-false means not affected by that test, not necessarily patched.",
+        "unverified_signals_excluded":suppressed_remote,
+        "counts":{"confirmed":len(rows)},
+        "status_note":"Only locally assessed AND separately reviewed host-specific findings are displayed. Zero findings does not prove safety. No scanner can guarantee 100% vulnerability certainty.",
         "findings":rows,
     }
 
@@ -160,20 +179,21 @@ def main():
     p.add_argument("--evidence-dir",type=Path,default=EVIDENCE)
     p.add_argument("--output",type=Path,default=OUTPUT)
     p.add_argument("--container",default=CONTAINER)
+    p.add_argument("--confirmations-dir",type=Path,default=Path("/var/lib/scanlattice-cve/confirmed-host-evidence"))
     a=p.parse_args()
     v2=json.loads(a.v2_report.read_text())
     vendor=load_vendor_evidence(a.evidence_dir)
-    ids={r["cve"] for r in v2.get("findings",[])}
-    ids.update(cve for payload in vendor.values() for cve,status
-               in payload["cve_status"].items() if status=="vendor_affected")
-    result=combine(v2,vendor,metadata(ids,a.container))
+    confirmations=load_confirmations(a.confirmations_dir)
+    ids={cve for (ip,cve),confirmation in confirmations.items()
+         if ip in vendor and vendor[ip].get("cve_status",{}).get(cve)=="vendor_affected"}
+    result=combine(v2,vendor,metadata(ids,a.container),confirmations)
     a.output.parent.mkdir(parents=True,exist_ok=True)
     tmp=a.output.with_suffix(".tmp")
     tmp.write_text(json.dumps(result,ensure_ascii=False,separators=(",",":")))
     os.chmod(tmp,0o644)
     os.replace(tmp,a.output)
     print("Published snapshot staged locally:",a.output)
-    print("Vendor hosts:",result["vendor_hosts"],"statuses:",result["counts"],
-          "suppressed unverified matches:",result["vendor_suppressed_remote_signals"])
+    print("Strict host findings:",result["counts"]["confirmed"],
+          "remote-only correlations withheld:",result["unverified_signals_excluded"])
 
 if __name__=="__main__":main()
