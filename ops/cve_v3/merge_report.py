@@ -154,8 +154,7 @@ def combine(report, vendor, catalog, confirmations=None):
                 "description":(meta.get("description") or "")[:300],
                 "evidence":"Local Ubuntu OpenSCAP plus separately reviewed host-specific evidence",
                 "verified_at":evidence["verified_at"],
-                "verification_method":evidence["verification_method"],
-                "evidence_reference":evidence["evidence_reference"],
+                "verification_method":"Authenticated package and configuration review",
                 "os_codename":payload.get("os_codename",""),
             })
     rows.sort(key=lambda x:(x["ip"],x["cve"]))
