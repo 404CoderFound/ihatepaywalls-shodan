@@ -67,5 +67,35 @@ patch(cli,
       'Port sets: quick, standard, extended, or 22,80,443,... (TCP only)',
       'Port sets: quick, standard, extended, all-tcp (allowlisted single IP only), or 22,80,443,... (TCP only)')
 
+test_file = root / "internal/scan/all_tcp_inventory_test.go"
+if not test_file.exists():
+    test_file.write_text("""package scan
+import (
+ "context"
+ "testing"
+)
+func TestExplicitAllTCPHostOnly(t *testing.T) {
+ c := DefaultConfig()
+ c.MaxPorts = 65535
+ c.AllowedCIDRs = []string{"185.220.213.51/32"}
+ plan, err := MakePlan(context.Background(), c,
+     Request{TargetType:"ip", Target:"185.220.213.51", Ports:"all-tcp"})
+ if err != nil { t.Fatal(err) }
+ if len(plan.Ports) != 65535 || plan.CheckCount != 65535 {
+     t.Fatalf("bad full TCP plan: %d ports %d checks",
+         len(plan.Ports),plan.CheckCount)
+ }
+ if _, err = MakePlan(context.Background(), c,
+     Request{TargetType:"ip", Target:"185.220.213.52", Ports:"all-tcp"}); err == nil {
+     t.Fatal("unapproved host incorrectly accepted")
+ }
+ if _, err = MakePlan(context.Background(), c,
+     Request{TargetType:"subnet", Target:"185.220.213.0/24", Ports:"all-tcp"}); err == nil {
+     t.Fatal("subnet incorrectly accepted")
+ }
+}
+""")
+    print("ADDED Go regression test",test_file)
+
 print("PATCH COMPLETE: run Go tests, build and back up the installed binary before upgrading.")
 print("This source-only patch has not changed running scans or config.")
