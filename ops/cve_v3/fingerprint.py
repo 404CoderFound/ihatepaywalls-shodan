@@ -8,7 +8,6 @@ No active probes, port changes, or speculative OS identification.
 import json
 import os
 import re
-from app.database import connection
 
 APPLY = os.getenv("APPLY") == "1"
 MAX_UPDATES = int(os.getenv("MAX_UPDATES", "50000"))
@@ -59,6 +58,7 @@ def fingerprint(service):
     return f"cpe:2.3:{part}:{vendor}:{product}:{version}:*:*:*:*:*:*:*"
 
 def main():
+    from app.database import connection
     with connection() as db:
         rows=[dict(r) for r in db.execute(
             "SELECT s.id,s.host_ip,s.port,s.proto,s.service,s.product,"
