@@ -88,6 +88,37 @@ class NightlyTests(unittest.TestCase):
             raise AssertionError("cooldown must skip scan")
         self.assertEqual(nightly.run(cfg,True,fetch_factory("185.220.213.51"),go,NOW),0)
 
+    def test_pagination_fetches_every_host(self):
+        cfg=config()
+        ips=["185.220.213."+str(i) for i in range(1,103)]
+        def fetch(url):
+            import urllib.parse
+            values=urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+            page=int(values["page"][0])
+            chunk=ips[(page-1)*100:page*100]
+            return {"page":page,"total":len(ips),"hosts":[{"ip":v} for v in chunk],
+                    "has_next":page*100<len(ips)}
+        self.assertEqual(set(nightly.inventory(cfg,fetch)),set(ips))
+
+    def test_reject_unbounded_scope(self):
+        import tempfile, json, pathlib
+        with tempfile.TemporaryDirectory() as folder:
+            root=pathlib.Path(folder)
+            scanner=root/"scanner.json"
+            scanner.write_text(json.dumps({"excluded_cidrs":[]}))
+            cfg=root/"inventory.json"
+            cfg.write_text(json.dumps({
+                "website_url":"https://scanlattice.plezi.eu",
+                "scanner_config":str(scanner),
+                "authorized_cidrs":["0.0.0.0/0"],
+                "ports":"extended","max_inventory_hosts":100,
+                "max_jobs_per_tick":1,"max_pending_jobs":1,
+                "max_jobs_per_night":1,"max_checks_per_night":100,
+                "cooldown_hours":24,"night_start_utc":0,"night_end_utc":5
+            }))
+            with self.assertRaises(ValueError):
+                nightly.load_config(cfg)
+
     def test_inventory_pagination_drift_aborts(self):
         cfg=config()
         with self.assertRaises(RuntimeError):
