@@ -39,6 +39,8 @@ IMAGE = "scanlattice-prodweb:cve-bulk-v1"
 BASE_HEALTH = "https://scanlattice.plezi.eu/api/health"
 JS_URL = "https://scanlattice.plezi.eu/static/cve-v3.js"
 REPORT_URL = "https://scanlattice.plezi.eu/static/cve-v3-public.json"
+MODERN_CSS_URL = "https://scanlattice.plezi.eu/static/sl-modern.css"
+MODERN_JS_URL = "https://scanlattice.plezi.eu/static/sl-modern.js"
 
 
 def docker(*args, **kwargs):
@@ -163,7 +165,7 @@ def health_check():
     # Retry the real public endpoints before considering rollback.
     for attempt in range(10):
         try:
-            for url in (BASE_HEALTH, JS_URL, REPORT_URL):
+            for url in (BASE_HEALTH, JS_URL, REPORT_URL, MODERN_CSS_URL, MODERN_JS_URL):
                 request = urllib.request.Request(
                     url, headers={"Cache-Control": "no-cache",
                                   "User-Agent": "ScanLattice-V3-Publisher/2.0"})
@@ -173,6 +175,10 @@ def health_check():
                         raise RuntimeError("Public endpoint unhealthy: " + url)
                 if url == JS_URL and b"ScanLattice V3" not in body:
                     raise RuntimeError("Public CVE V3 JS mismatch")
+                if url == MODERN_CSS_URL and b".sl-modern" not in body:
+                    raise RuntimeError("Modern stylesheet unavailable")
+                if url == MODERN_JS_URL and b"sl-modern" not in body:
+                    raise RuntimeError("Modern navigation script unavailable")
                 if url == REPORT_URL:
                     result = json.loads(body)
                     if result.get("schema_version") != 1:
@@ -283,6 +289,7 @@ def deploy(retire=False):
 
     target = prepare_static()
     if already_mounted(target):
+        health_check()
         print("Read-only V3 static mount active; refreshed report without restarting web.")
         return
     print("Applying Compose override with read-only V3 static mount...")
