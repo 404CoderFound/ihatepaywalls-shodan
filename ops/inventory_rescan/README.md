@@ -5,9 +5,10 @@ main search index, then schedules one-shot scans for in-scope hosts that
 are due. It does NOT require adding each host individually.
 
 This reads the public GET /api/search?sort=ip&limit=100&page=N
-response (which comes from the hosts table). Passive-only IP mentions are
-not part of the scanned-host inventory. Reading the website is **not**
-authorization to scan a host.
+response for indexed hosts, plus all passive-intelligence pages for
+additional explicit IPs. It does NOT enumerate every address inside an
+ASN/prefix and does NOT turn passive observations into scanning authorization.
+Reading the website is **not** authorization to scan a host.
 
 The scheduler uses existing v3 daemon persistent queue. It never modifies
 the Docker image, PostgreSQL, or CVE correlation tables.
