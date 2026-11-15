@@ -8,6 +8,7 @@ import fingerprint
 import merge_report
 import vendor_oval
 import verify_ingestion
+import publish
 
 APACHE={"cve":"CVE-2024-38472","ip":"185.220.213.51",
         "status":"potential","evidence":"remote"}
@@ -87,6 +88,24 @@ class CVEV3Tests(unittest.TestCase):
         self.assertIsNone(fingerprint.fingerprint({
             "banner":"Apache/2.4.58\nnginx/1.24.0","cpe":""
         }))
+    def test_publisher_checks_actual_dom_not_nav_text(self):
+        html = """<!doctype html><html><body>
+          <section id="host-content"></section>
+          <section id='insight-content'></section>
+          <script src="/static/app.js"></script>
+          <script src="/static/insights.js"></script></body></html>"""
+        result = publish.validate_ui(html)
+        self.assertTrue(all(result.values()))
+        self.assertNotIn('data-page="vulnerabilities"', html)
+
+    def test_publisher_fails_closed_on_unsupported_dom(self):
+        with self.assertRaisesRegex(RuntimeError, "insight-content"):
+            publish.validate_ui(
+                '<html><body><div id="host-content"></div>'
+                '<script src="/static/app.js"></script>'
+                '<script src="/static/insights.js"></script></body></html>'
+            )
+
     def test_recent_completed_job_is_visible_on_website(self):
         recent=(datetime.now(timezone.utc)-timedelta(hours=1)).isoformat()
         job={"status":"completed","created_at":recent,
