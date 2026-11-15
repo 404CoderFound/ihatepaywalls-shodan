@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Run on AWS EC2. Installs code and timer, but does not enable active scans
-# until --enable is given AND explicit authorized_cidrs are configured.
+# until --enable is explicitly requested.
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 ACTION="install"
 if (( $# > 0 )); then ACTION="$1"; fi
@@ -31,7 +31,7 @@ fi
 
 cat >/etc/systemd/system/scanlattice-inventory-rescan.service <<'EOF'
 [Unit]
-Description=Queue night-time scans for all explicitly authorized indexed ScanLattice hosts
+Description=Queue night-time scans for all public indexed ScanLattice hosts
 Wants=network-online.target scanlattice-v3.service
 After=network-online.target scanlattice-v3.service
 
@@ -56,16 +56,11 @@ WantedBy=timers.target
 EOF
 systemctl daemon-reload
 echo "AWS inventory scheduler installed. It has NOT queued scans."
-echo "Edit /etc/scanlattice-v3/inventory-rescan.json to authorize the owned IP ranges."
+echo "The ScanLattice website inventory is the scan target list (no CIDR list)."
+echo "The existing scanner exclusion rules and job budgets remain active."
 echo "Preview: sudo scanlattice-inventory-rescan"
 if [[ "$ACTION" == "--enable" ]]; then
-  python3 - <<'PY'
-import json
-p="/etc/scanlattice-v3/inventory-rescan.json"
-cfg=json.load(open(p))
-assert cfg.get("authorized_cidrs"), "Explicit authorized_cidrs required before enabling"
-PY
   /usr/local/sbin/scanlattice-inventory-rescan
   systemctl enable --now scanlattice-inventory-rescan.timer
-  echo "Nightly queue enabled. Only eligible in-scope hosts are scanned."
+  echo "Nightly queue enabled for all public indexed hosts, subject to scanner exclusions and job limits."
 fi
