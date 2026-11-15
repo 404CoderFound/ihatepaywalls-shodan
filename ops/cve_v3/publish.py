@@ -59,14 +59,15 @@ def ui_features(html):
     omit/rename those while keeping the same host and insight containers.
     """
     def has_id(name):
-        pattern = r"""\\bid\\s*=\\s*([\\"'])""" + re.escape(name) + r"""\\1"""
+        pattern = r"""\bid\s*=\s*(['"])""" + re.escape(name) + r"""\1"""
         return bool(re.search(pattern, html, re.IGNORECASE))
+    lower = html.lower()
     return {
         "host-content": has_id("host-content"),
         "insight-content": has_id("insight-content"),
-        "app.js": bool(re.search(r"<script\\b[^>]+\\bapp\\.js(?:\\?[^\\"']*)?[\\"']", html, re.I)),
-        "insights.js": bool(re.search(r"<script\\b[^>]+\\binsights\\.js(?:\\?[^\\"']*)?[\\"']", html, re.I)),
-        "body-close": html.lower().count("</body>") == 1,
+        "app.js": "/app.js" in lower,
+        "insights.js": "/insights.js" in lower,
+        "body-close": lower.count("</body>") == 1,
     }
 
 
