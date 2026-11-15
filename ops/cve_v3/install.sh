@@ -24,12 +24,12 @@ test -x /usr/local/sbin/scanlattice-cve-v2 || {
 docker inspect scanlattice-v2-prodweb-web-1 >/dev/null
 python3 -m unittest discover -s "$ROOT" -p "test_v3.py" -v
 python3 -m py_compile "$ROOT/vendor_oval.py" "$ROOT/merge_report.py" \
-  "$ROOT/doctor.py" "$ROOT/publish.py" "$ROOT/fingerprint.py"
+  "$ROOT/doctor.py" "$ROOT/publish.py" "$ROOT/fingerprint.py" "$ROOT/vendor_import.py"
 if command -v node >/dev/null 2>&1; then node --check "$ROOT/cve-v3.js"; fi
 
 install -d -m 0755 "$DEST"
 install -m 0644 "$ROOT/vendor_oval.py" "$ROOT/merge_report.py" \
-  "$ROOT/doctor.py" "$ROOT/publish.py" "$ROOT/fingerprint.py" \
+  "$ROOT/doctor.py" "$ROOT/publish.py" "$ROOT/fingerprint.py" "$ROOT/vendor_import.py" \
   "$ROOT/cve-v3.js" "$DEST/"
 install -m 0755 "$ROOT/reconcile.sh" "$DEST/reconcile.sh"
 install -d -m 0700 /var/lib/scanlattice-cve/vendor \
