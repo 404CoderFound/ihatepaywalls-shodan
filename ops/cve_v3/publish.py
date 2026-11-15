@@ -30,6 +30,10 @@ LOCAL_REPORT = Path("/var/lib/scanlattice-cve/cve-v3-public.json")
 BACKUPS = Path("/var/lib/scanlattice-cve/site-v3-backups")
 PUBLISHED = Path("/var/lib/scanlattice-cve/site-v3-static")
 SCRIPT = Path("/usr/local/lib/scanlattice/cve_v3/cve-v3.js")
+MODERN_CSS = Path("/usr/local/lib/scanlattice/cve_v3/modern.css")
+MODERN_JS = Path("/usr/local/lib/scanlattice/cve_v3/modern.js")
+STYLE_TAG = '<link rel="stylesheet" href="/static/sl-modern.css">'
+MODERN_TAG = '<script src="/static/sl-modern.js" defer></script>'
 SCRIPT_TAG = '<script src="/static/cve-v3.js" defer></script>'
 IMAGE = "scanlattice-prodweb:cve-bulk-v1"
 BASE_HEALTH = "https://scanlattice.plezi.eu/api/health"
@@ -86,10 +90,18 @@ def validate_ui(html):
 
 def patched_index(html):
     validate_ui(html)
+    if html.lower().count("</head>") != 1:
+        raise RuntimeError("Cannot insert modern stylesheet into this HTML")
     if SCRIPT_TAG not in html:
         if html.lower().count("</body>") != 1:
             raise RuntimeError("Cannot insert V3 script into this HTML")
         html = re.sub(r"</body>", SCRIPT_TAG + "</body>", html, count=1,
+                      flags=re.IGNORECASE)
+    if STYLE_TAG not in html:
+        html = re.sub(r"</head>", STYLE_TAG + "</head>", html, count=1,
+                      flags=re.IGNORECASE)
+    if MODERN_TAG not in html:
+        html = re.sub(r"</body>", MODERN_TAG + "</body>", html, count=1,
                       flags=re.IGNORECASE)
     return html
 
@@ -113,7 +125,7 @@ def atomic_copy(source, destination):
 
 
 def checked_report():
-    if not SCRIPT.is_file() or not LOCAL_REPORT.is_file():
+    if not all(p.is_file() for p in (SCRIPT, MODERN_CSS, MODERN_JS, LOCAL_REPORT)):
         raise RuntimeError("Missing V3 script/report. Run V3 assess/merge first.")
     data = json.loads(LOCAL_REPORT.read_text())
     if data.get("schema_version") != 1 or not isinstance(data.get("findings"), list):
@@ -220,6 +232,8 @@ def prepare_static():
                 docker("cp", f"{CONTAINER}:{target}/index.html",
                        str(BACKUPS / "index.html"))
             atomic_copy(SCRIPT, tmp / "cve-v3.js")
+            atomic_copy(MODERN_CSS, tmp / "sl-modern.css")
+            atomic_copy(MODERN_JS, tmp / "sl-modern.js")
             atomic_copy(LOCAL_REPORT, tmp / "cve-v3-public.json")
             os.rename(tmp, PUBLISHED)
         except Exception:
@@ -234,6 +248,8 @@ def prepare_static():
         atomic_bytes(PUBLISHED / "index.html",
                      patched_index((PUBLISHED / "index.html").read_text()).encode())
         atomic_copy(SCRIPT, PUBLISHED / "cve-v3.js")
+        atomic_copy(MODERN_CSS, PUBLISHED / "sl-modern.css")
+        atomic_copy(MODERN_JS, PUBLISHED / "sl-modern.js")
         atomic_copy(LOCAL_REPORT, PUBLISHED / "cve-v3-public.json")
 
     yaml = overlay_yaml(target)
