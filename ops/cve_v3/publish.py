@@ -31,6 +31,7 @@ BACKUPS = Path("/var/lib/scanlattice-cve/site-v3-backups")
 PUBLISHED = Path("/var/lib/scanlattice-cve/site-v3-static")
 SCRIPT = Path("/usr/local/lib/scanlattice/cve_v3/cve-v3.js")
 STYLE = Path("/usr/local/lib/scanlattice/cve_v3/site-clean.css")
+SEARCH_SCRIPT = Path("/usr/local/lib/scanlattice/cve_v3/search-dedup.js")
 SCRIPT_TAG = '<script src="/static/cve-v3.js" defer></script>'
 STYLE_TAG = '<link rel="stylesheet" href="/static/site-clean.css">'
 IMAGE = "scanlattice-prodweb:cve-bulk-v1"
