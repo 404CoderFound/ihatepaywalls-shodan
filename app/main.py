@@ -14,7 +14,7 @@ from starlette.datastructures import Headers
 from .database import connection, init_db, upsert_host_identity, utc_now
 from .search import QueryError, parse_query
 from .host_search import asn_intelligence, search_hosts
-from .passive import APPROVED_RDAP_BASES, provider_status, search_cached
+from .passive import APPROVED_RDAP_BASES, provider_status, search_cached, prefer_indexed_hosts
 from .enrichment import enrichment_target, ensure_enrichment, queue_job, recover_pending, run_due_schedules_once, start_schedule_runner
 from .rate_limit import FixedWindowLimiter
 from .intelligence import MAX_IMPORT_BYTES, MAX_IMPORT_CHUNK, router as intelligence_router
