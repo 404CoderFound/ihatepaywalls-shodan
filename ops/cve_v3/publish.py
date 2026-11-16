@@ -130,7 +130,7 @@ def atomic_copy(source, destination):
 
 
 def checked_report():
-    if not SCRIPT.is_file() or not STYLE.is_file() or not LOCAL_REPORT.is_file():
+    if not SCRIPT.is_file() or not STYLE.is_file() or not SEARCH_SCRIPT.is_file() or not LOCAL_REPORT.is_file():
         raise RuntimeError("Missing V3 script/report. Run V3 assess/merge first.")
     data = json.loads(LOCAL_REPORT.read_text())
     if data.get("schema_version") != 1 or not isinstance(data.get("findings"), list):
