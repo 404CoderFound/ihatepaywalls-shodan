@@ -132,7 +132,7 @@ def search(q:str=Query("",max_length=500),page:int=Query(1,ge=1),prefix_page:int
     should_queue=False;enrichment_job=None
     with connection() as db:
         host_page=search_hosts(db,parsed,page,sort,limit)
-        passive=search_cached(db,parsed)
+        passive=prefer_indexed_hosts(db,search_cached(db,parsed))
         enrichment_job,should_queue=ensure_enrichment(db,parsed,ENRICHMENT_ENABLED,MAX_ENRICHMENT_QUEUE)
         enrichment=provider_status(db)
         asn_values=parsed.filters.get("asn",[])
