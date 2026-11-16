@@ -79,6 +79,44 @@ def search_cached(db, parsed: ParsedQuery) -> list[dict[str, Any]]:
     return results
 
 
+def prefer_indexed_hosts(db, passive_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Prefer indexed hosts; show a single most-recent passive record per unindexed IP.
+
+    This happens BEFORE passive pagination, so an indexed IP on a different
+    host page never reappears as a passive result. Other network metadata
+    remains available; repeated identical subjects/types are collapsed.
+    The input is ordered newest-first by search_cached().
+    """
+    ips = list(dict.fromkeys(str(row.get("ip") or "").strip()
+                             for row in passive_rows if row.get("ip")))
+    indexed = set()
+    for start in range(0, len(ips), 400):
+        batch = ips[start:start + 400]
+        placeholders = ",".join("?" for _ in batch)
+        indexed.update(row[0] for row in db.execute(
+            f"SELECT ip FROM hosts WHERE ip IN ({placeholders})", batch))
+
+    output = []
+    seen = set()
+    for row in passive_rows:
+        ip = str(row.get("ip") or "").strip()
+        if ip:
+            key = ("ip", ip.lower())
+            if ip in indexed or key in seen:
+                continue
+        else:
+            # Retain distinct ASN/prefix/domain facts, dedupe repeated copies.
+            key = ("metadata", str(row.get("subject") or "").lower(),
+                   str(row.get("record_type") or "").lower(),
+                   str(row.get("network") or "").lower(),
+                   str(row.get("domain") or "").lower())
+            if key in seen:
+                continue
+        seen.add(key)
+        output.append(row)
+    return output
+
+
 def enrich_from_approved_provider(db, parsed: ParsedQuery) -> dict[str, Any]:
     """Fetch exact-IP RDAP metadata only from a fixed registry endpoint allowlist."""
     values = parsed.filters.get("ip", [])

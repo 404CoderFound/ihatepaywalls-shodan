@@ -143,9 +143,23 @@ async function search(query, page, prefixPage=1, metadataPage=1) {
     facets("facet-ports", data.facets.ports, "port");
     facets("facet-countries", data.facets.countries, "country");
     const indexed = data.hosts.map(hostCard).join("");
-    const passive = data.passive_intelligence.map(passiveCard).join("");
+    // Backend globally removes passive IPs that exist in the indexed hosts
+    // table. Also guard locally against duplicated rows in older APIs.
+    const seen = new Set(data.hosts.map(host => String(host.ip).toLowerCase()));
+    const passive = data.passive_intelligence.filter(row => {
+      if (!row.ip) return true;
+      const key = String(row.ip).toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).map(passiveCard).join("");
+    const combined = indexed + passive;
     $("result-items").innerHTML = data.has_information
-      ? `${asnOverview(data.asn_intelligence,query,data.page,metadataPage)}${indexed ? `<h3 class="result-category">Indexed Service Observations</h3>${indexed}` : data.asn_intelligence?'<div class="empty compact"><strong>No indexed hosts for this ASN.</strong>Announced networks are not treated as active hosts.</div>':""}${passive ? `<h3 class="result-category">Passive Intelligence</h3>${passive}` : ""}`
+      ? `${asnOverview(data.asn_intelligence,query,data.page,metadataPage)}${combined
+        ? `<h3 class="result-category">Search results</h3>${combined}`
+        : data.asn_intelligence
+          ? '<div class="empty compact"><strong>No discovered hosts for this ASN.</strong>Announced networks are not treated as active hosts.</div>'
+          : ""}`
       : `<div class="empty"><strong>${esc(data.message)}</strong>No active measurement was started.</div>`;
     $("pagination").innerHTML = numberedPagination(data,query,prefixPage,metadataPage);
   } catch (error) {
@@ -220,7 +234,10 @@ async function loadHost(ip) {
     const history = await api(`/api/hosts/${encodeURIComponent(ip)}/observations?page=1&limit=50`);
     const observations = data.latest_by_port.map(row => `<article class="observation"><h3>${row.port}/${esc(row.proto)} — ${esc(row.product || row.service || "Unknown service")}</h3><div class="meta">HISTORICAL OBSERVATION · ${esc(row.seen_at)} · ${esc(row.source)}</div><pre>${esc(String(row.banner || "No banner collected").replace(/\\r\\n|\\n|\\r/g, "\n"))}</pre><details><summary>HTTP / TLS / CPE metadata</summary><pre>${esc(JSON.stringify({http:row.http,tls:row.tls,cpe:row.cpe,ssh_id:row.ssh_id},null,2))}</pre></details></article>`).join("");
     const timeline = history.results.map(row=>`<div class="service-detail"><b>${row.port}/${esc(row.proto)} ${esc(row.product||row.service)}</b><span>${esc(String(row.banner ?? "").replace(/\\r\\n|\\n|\\r/g, "\n"))}</span><small>${esc(row.seen_at)} · ${esc(row.source)}</small></div>`).join("");
-    const passive = data.passive_intelligence.map(passiveCard).join("");
+    // Indexed host details take precedence over passive-only fallback records.
+    const passiveRows = Object.prototype.hasOwnProperty.call(host, "first_seen")
+      ? [] : data.passive_intelligence.slice(0, 1);
+    const passive = passiveRows.map(passiveCard).join("");
     const potential=(data.potential_vulnerabilities||[]).map(v=>`<article class="observation"><h3>${esc(v.cve)} · Potential match</h3><div class="meta">Source: ${esc(v.source)} · Observed: ${esc(v.observed_at)}</div><pre>${esc(JSON.stringify(v.evidence,null,2))}</pre></article>`).join("");
     let scanAction="";
     if(await checkSession()){

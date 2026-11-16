@@ -31,12 +31,15 @@ BACKUPS = Path("/var/lib/scanlattice-cve/site-v3-backups")
 PUBLISHED = Path("/var/lib/scanlattice-cve/site-v3-static")
 SCRIPT = Path("/usr/local/lib/scanlattice/cve_v3/cve-v3.js")
 STYLE = Path("/usr/local/lib/scanlattice/cve_v3/site-clean.css")
+SEARCH_SCRIPT = Path("/usr/local/lib/scanlattice/cve_v3/search-dedup.js")
 SCRIPT_TAG = '<script src="/static/cve-v3.js" defer></script>'
 STYLE_TAG = '<link rel="stylesheet" href="/static/site-clean.css">'
+SEARCH_TAG = '<script src="/static/search-dedup.js" defer></script>'
 IMAGE = "scanlattice-prodweb:cve-bulk-v1"
 BASE_HEALTH = "https://scanlattice.plezi.eu/api/health"
 JS_URL = "https://scanlattice.plezi.eu/static/cve-v3.js"
 CSS_URL = "https://scanlattice.plezi.eu/static/site-clean.css"
+SEARCH_JS_URL = "https://scanlattice.plezi.eu/static/search-dedup.js"
 REPORT_URL = "https://scanlattice.plezi.eu/static/cve-v3-public.json"
 
 
@@ -102,6 +105,9 @@ def patched_index(html):
             raise RuntimeError("Cannot insert V3 script into this HTML")
         html = re.sub(r"</body>", SCRIPT_TAG + "</body>", html, count=1,
                       flags=re.IGNORECASE)
+    if SEARCH_TAG not in html:
+        html = re.sub(r"</body>", SEARCH_TAG + "</body>", html,
+                      count=1, flags=re.IGNORECASE)
     return html
 
 
@@ -124,7 +130,7 @@ def atomic_copy(source, destination):
 
 
 def checked_report():
-    if not SCRIPT.is_file() or not STYLE.is_file() or not LOCAL_REPORT.is_file():
+    if not SCRIPT.is_file() or not STYLE.is_file() or not SEARCH_SCRIPT.is_file() or not LOCAL_REPORT.is_file():
         raise RuntimeError("Missing V3 script/report. Run V3 assess/merge first.")
     data = json.loads(LOCAL_REPORT.read_text())
     if data.get("schema_version") != 1 or not isinstance(data.get("findings"), list):
@@ -162,7 +168,7 @@ def health_check():
     # Retry the real public endpoints before considering rollback.
     for attempt in range(10):
         try:
-            for url in (BASE_HEALTH, JS_URL, CSS_URL, REPORT_URL):
+            for url in (BASE_HEALTH, JS_URL, CSS_URL, SEARCH_JS_URL, REPORT_URL):
                 request = urllib.request.Request(
                     url, headers={"Cache-Control": "no-cache",
                                   "User-Agent": "ScanLattice-V3-Publisher/2.0"})
@@ -172,6 +178,8 @@ def health_check():
                         raise RuntimeError("Public endpoint unhealthy: " + url)
                 if url == CSS_URL and b"ScanLattice Clean Navigation V4" not in body:
                     raise RuntimeError("Public clean UI CSS mismatch")
+                if url == SEARCH_JS_URL and b"ScanLattice V5 search presentation" not in body:
+                    raise RuntimeError("Public search-dedup JS mismatch")
                 if url == JS_URL and b"ScanLattice V3" not in body:
                     raise RuntimeError("Public CVE V3 JS mismatch")
                 if url == REPORT_URL:
@@ -233,6 +241,7 @@ def prepare_static():
                 docker("cp", f"{CONTAINER}:{target}/index.html",
                        str(BACKUPS / "index.html"))
             atomic_copy(SCRIPT, tmp / "cve-v3.js")
+            atomic_copy(SEARCH_SCRIPT, tmp / "search-dedup.js")
             atomic_copy(STYLE, tmp / "site-clean.css")
             atomic_copy(LOCAL_REPORT, tmp / "cve-v3-public.json")
             os.rename(tmp, PUBLISHED)
@@ -248,6 +257,7 @@ def prepare_static():
         atomic_bytes(PUBLISHED / "index.html",
                      patched_index((PUBLISHED / "index.html").read_text()).encode())
         atomic_copy(SCRIPT, PUBLISHED / "cve-v3.js")
+        atomic_copy(SEARCH_SCRIPT, PUBLISHED / "search-dedup.js")
         atomic_copy(STYLE, PUBLISHED / "site-clean.css")
         atomic_copy(LOCAL_REPORT, PUBLISHED / "cve-v3-public.json")
 

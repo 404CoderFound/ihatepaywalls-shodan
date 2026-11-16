@@ -14,7 +14,7 @@ from starlette.datastructures import Headers
 from .database import connection, init_db, upsert_host_identity, utc_now
 from .search import QueryError, parse_query
 from .host_search import asn_intelligence, search_hosts
-from .passive import APPROVED_RDAP_BASES, provider_status, search_cached
+from .passive import APPROVED_RDAP_BASES, provider_status, search_cached, prefer_indexed_hosts
 from .enrichment import enrichment_target, ensure_enrichment, queue_job, recover_pending, run_due_schedules_once, start_schedule_runner
 from .rate_limit import FixedWindowLimiter
 from .intelligence import MAX_IMPORT_BYTES, MAX_IMPORT_CHUNK, router as intelligence_router
@@ -132,7 +132,7 @@ def search(q:str=Query("",max_length=500),page:int=Query(1,ge=1),prefix_page:int
     should_queue=False;enrichment_job=None
     with connection() as db:
         host_page=search_hosts(db,parsed,page,sort,limit)
-        passive=search_cached(db,parsed)
+        passive=prefer_indexed_hosts(db,search_cached(db,parsed))
         enrichment_job,should_queue=ensure_enrichment(db,parsed,ENRICHMENT_ENABLED,MAX_ENRICHMENT_QUEUE)
         enrichment=provider_status(db)
         asn_values=parsed.filters.get("asn",[])
@@ -141,8 +141,12 @@ def search(q:str=Query("",max_length=500),page:int=Query(1,ge=1),prefix_page:int
     facets={"ports":{str(row["port"]):row["hosts"] for row in host_page["facets"]["ports"]},
             "countries":{row["country"]:row["hosts"] for row in host_page["facets"]["countries"]},
             "products":{row["product"]:row["hosts"] for row in host_page["facets"]["products"]}}
-    passive_total=len(passive);metadata_per_page=25;metadata_start=(metadata_page-1)*metadata_per_page
-    passive_page=[] if asn_result else passive[metadata_start:metadata_start+metadata_per_page]
+    # ASN overview already renders prefix/registry facts. Show only unindexed
+    # IP observations in its unified host results; never fabricate hosts from
+    # announced prefixes.
+    visible_passive=[row for row in passive if row.get("ip")] if asn_result else passive
+    passive_total=len(visible_passive);metadata_per_page=25;metadata_start=(metadata_page-1)*metadata_per_page
+    passive_page=visible_passive[metadata_start:metadata_start+metadata_per_page]
     return {"query":q,"sort":sort,**{key:host_page[key] for key in ("page","per_page","total","total_pages","has_next","has_previous","range_start","range_end")},"pages":host_page["total_pages"],"results":host_page["hosts"],"hosts":host_page["hosts"],"indexed_observations":host_page["hosts"],"passive_total":passive_total,"passive_intelligence":passive_page,"passive_pagination":{"page":metadata_page,"per_page":metadata_per_page,"total":passive_total,"total_pages":math.ceil(passive_total/metadata_per_page) if passive_total else 0,"has_next":metadata_start+metadata_per_page<passive_total},"asn_intelligence":asn_result,"has_information":bool(host_page["total"] or passive or asn_result),"message":None if host_page["total"] or passive or asn_result else "No indexed or passive information available.","enrichment":dict(enrichment_job) if enrichment_job else enrichment,"facets":facets}
 
 @app.get("/api/enrichment/{job_id}")
