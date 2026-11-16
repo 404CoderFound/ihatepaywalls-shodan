@@ -178,6 +178,8 @@ def health_check():
                         raise RuntimeError("Public endpoint unhealthy: " + url)
                 if url == CSS_URL and b"ScanLattice Clean Navigation V4" not in body:
                     raise RuntimeError("Public clean UI CSS mismatch")
+                if url == SEARCH_JS_URL and b"ScanLattice V5 search presentation" not in body:
+                    raise RuntimeError("Public search-dedup JS mismatch")
                 if url == JS_URL and b"ScanLattice V3" not in body:
                     raise RuntimeError("Public CVE V3 JS mismatch")
                 if url == REPORT_URL:
