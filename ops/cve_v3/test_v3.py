@@ -105,6 +105,12 @@ class CVEV3Tests(unittest.TestCase):
         js = Path(__file__).with_name("cve-v3.js")
         source = js.read_text()
         self.assertIn("c => ({", source)
+        self.assertIn("function cleanNavigation()", source)
+        self.assertIn("function renderDetail(out, cve, data)", source)
+        self.assertIn("Potential Vulnerability Correlations", source)
+        self.assertIn("authenticated vendor package rules", source)
+        self.assertIn(r"/^CVE-\d{4}-\d{4,}$/", source)
+        self.assertNotIn(r"/^CVE-\\d{4}", source)
         self.assertNotIn(':"&quot;":"&#39;"', source)
         if shutil.which("node"):
             subprocess.run(["node", "--check", str(js)], check=True)
@@ -124,8 +130,23 @@ class CVEV3Tests(unittest.TestCase):
           </body></html>"""
         first = publish.patched_index(html)
         self.assertEqual(first.count(publish.SCRIPT_TAG), 1)
+        self.assertEqual(first.count(publish.STYLE_TAG), 1)
         self.assertEqual(first, publish.patched_index(first))
         self.assertIn('<script src="/static/cve-v3.js" defer></script>', first)
+        self.assertIn('<link rel="stylesheet" href="/static/site-clean.css">', first)
+
+    def test_clean_stylesheet_injected_after_original_css(self):
+        html = ("""<!doctype html><html><head>
+          <link rel="stylesheet" href="/static/style.css"></head><body>
+          <section id="host-content"></section>
+          <section id="insight-content"></section>
+          <script src="/static/app.js" defer></script>
+          <script src="/static/insights.js" defer></script></body></html>""")
+        result = publish.patched_index(html)
+        self.assertEqual(result.count(publish.STYLE_TAG), 1)
+        self.assertLess(result.index("/static/style.css"), result.index("/static/site-clean.css"))
+        self.assertLess(result.index("/static/site-clean.css"), result.index("</head>"))
+        self.assertEqual(result, publish.patched_index(result))
 
     def test_publisher_checks_actual_dom_not_nav_text(self):
         html = """<!doctype html><html><body>
