@@ -234,7 +234,10 @@ async function loadHost(ip) {
     const history = await api(`/api/hosts/${encodeURIComponent(ip)}/observations?page=1&limit=50`);
     const observations = data.latest_by_port.map(row => `<article class="observation"><h3>${row.port}/${esc(row.proto)} — ${esc(row.product || row.service || "Unknown service")}</h3><div class="meta">HISTORICAL OBSERVATION · ${esc(row.seen_at)} · ${esc(row.source)}</div><pre>${esc(String(row.banner || "No banner collected").replace(/\\r\\n|\\n|\\r/g, "\n"))}</pre><details><summary>HTTP / TLS / CPE metadata</summary><pre>${esc(JSON.stringify({http:row.http,tls:row.tls,cpe:row.cpe,ssh_id:row.ssh_id},null,2))}</pre></details></article>`).join("");
     const timeline = history.results.map(row=>`<div class="service-detail"><b>${row.port}/${esc(row.proto)} ${esc(row.product||row.service)}</b><span>${esc(String(row.banner ?? "").replace(/\\r\\n|\\n|\\r/g, "\n"))}</span><small>${esc(row.seen_at)} · ${esc(row.source)}</small></div>`).join("");
-    const passive = data.passive_intelligence.map(passiveCard).join("");
+    // Indexed host details take precedence over passive-only fallback records.
+    const passiveRows = Object.prototype.hasOwnProperty.call(host, "first_seen")
+      ? [] : data.passive_intelligence.slice(0, 1);
+    const passive = passiveRows.map(passiveCard).join("");
     const potential=(data.potential_vulnerabilities||[]).map(v=>`<article class="observation"><h3>${esc(v.cve)} · Potential match</h3><div class="meta">Source: ${esc(v.source)} · Observed: ${esc(v.observed_at)}</div><pre>${esc(JSON.stringify(v.evidence,null,2))}</pre></article>`).join("");
     let scanAction="";
     if(await checkSession()){
