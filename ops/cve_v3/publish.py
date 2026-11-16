@@ -241,6 +241,7 @@ def prepare_static():
                 docker("cp", f"{CONTAINER}:{target}/index.html",
                        str(BACKUPS / "index.html"))
             atomic_copy(SCRIPT, tmp / "cve-v3.js")
+            atomic_copy(SEARCH_SCRIPT, tmp / "search-dedup.js")
             atomic_copy(STYLE, tmp / "site-clean.css")
             atomic_copy(LOCAL_REPORT, tmp / "cve-v3-public.json")
             os.rename(tmp, PUBLISHED)
