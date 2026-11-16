@@ -132,8 +132,21 @@ class CVEV3Tests(unittest.TestCase):
         self.assertEqual(first.count(publish.SCRIPT_TAG), 1)
         self.assertEqual(first.count(publish.STYLE_TAG), 1)
         self.assertEqual(first, publish.patched_index(first))
+        self.assertIn('<script src="/static/search-dedup.js" defer></script>', first)
+        self.assertEqual(first.count(publish.SEARCH_TAG), 1)
         self.assertIn('<script src="/static/cve-v3.js" defer></script>', first)
         self.assertIn('<link rel="stylesheet" href="/static/site-clean.css">', first)
+
+    def test_search_dedup_browser_overlay_is_syntax_valid(self):
+        js = Path(__file__).with_name("search-dedup.js")
+        source = js.read_text()
+        self.assertIn("async function hasIndexedHost(ip)", source)
+        self.assertIn("async function getAsnMetadata(hash)", source)
+        self.assertIn("function normalizeHost()", source.replace("async function normalizeHost()", "function normalizeHost()"))
+        self.assertIn("passive-record", source)
+        self.assertIn("result-category", source)
+        if shutil.which("node"):
+            subprocess.run(["node", "--check", str(js)], check=True)
 
     def test_clean_stylesheet_injected_after_original_css(self):
         html = ("""<!doctype html><html><head>
