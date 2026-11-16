@@ -168,7 +168,7 @@ def health_check():
     # Retry the real public endpoints before considering rollback.
     for attempt in range(10):
         try:
-            for url in (BASE_HEALTH, JS_URL, CSS_URL, REPORT_URL):
+            for url in (BASE_HEALTH, JS_URL, CSS_URL, SEARCH_JS_URL, REPORT_URL):
                 request = urllib.request.Request(
                     url, headers={"Cache-Control": "no-cache",
                                   "User-Agent": "ScanLattice-V3-Publisher/2.0"})
