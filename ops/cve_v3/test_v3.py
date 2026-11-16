@@ -115,6 +115,18 @@ class CVEV3Tests(unittest.TestCase):
         if shutil.which("node"):
             subprocess.run(["node", "--check", str(js)], check=True)
 
+    def test_verified_host_search_does_not_treat_empty_legacy_table_as_no_hosts(self):
+        js = Path(__file__).with_name("cve-v3.js").read_text()
+        self.assertIn("function renderVerifiedSearchState(out, data)", js)
+        self.assertIn("No verified affected-host findings", js)
+        self.assertIn("vulnerable:true", js)
+        self.assertIn("min_severity:", js)
+        self.assertIn("vuln:CVE-", js)
+        self.assertIn('item.status === "vendor_affected"', js)
+        self.assertIn("No indexed hosts|No discovered hosts", js)
+        self.assertIn('observe("result-items")', js)
+        self.assertIn("legacy host filters do not use that report", js)
+
     def test_read_only_overlay_contains_complete_static_mount(self):
         yaml = publish.overlay_yaml("/srv/app/static")
         self.assertIn("read_only: true", yaml)
