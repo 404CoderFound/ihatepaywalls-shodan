@@ -105,6 +105,9 @@ def patched_index(html):
             raise RuntimeError("Cannot insert V3 script into this HTML")
         html = re.sub(r"</body>", SCRIPT_TAG + "</body>", html, count=1,
                       flags=re.IGNORECASE)
+    if SEARCH_TAG not in html:
+        html = re.sub(r"</body>", SEARCH_TAG + "</body>", html,
+                      count=1, flags=re.IGNORECASE)
     return html
 
 
