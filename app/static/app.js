@@ -143,9 +143,23 @@ async function search(query, page, prefixPage=1, metadataPage=1) {
     facets("facet-ports", data.facets.ports, "port");
     facets("facet-countries", data.facets.countries, "country");
     const indexed = data.hosts.map(hostCard).join("");
-    const passive = data.passive_intelligence.map(passiveCard).join("");
+    // Backend globally removes passive IPs that exist in the indexed hosts
+    // table. Also guard locally against duplicated rows in older APIs.
+    const seen = new Set(data.hosts.map(host => String(host.ip).toLowerCase()));
+    const passive = data.passive_intelligence.filter(row => {
+      if (!row.ip) return true;
+      const key = String(row.ip).toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).map(passiveCard).join("");
+    const combined = indexed + passive;
     $("result-items").innerHTML = data.has_information
-      ? `${asnOverview(data.asn_intelligence,query,data.page,metadataPage)}${indexed ? `<h3 class="result-category">Indexed Service Observations</h3>${indexed}` : data.asn_intelligence?'<div class="empty compact"><strong>No indexed hosts for this ASN.</strong>Announced networks are not treated as active hosts.</div>':""}${passive ? `<h3 class="result-category">Passive Intelligence</h3>${passive}` : ""}`
+      ? `${asnOverview(data.asn_intelligence,query,data.page,metadataPage)}${combined
+        ? `<h3 class="result-category">Search results</h3>${combined}`
+        : data.asn_intelligence
+          ? '<div class="empty compact"><strong>No discovered hosts for this ASN.</strong>Announced networks are not treated as active hosts.</div>'
+          : ""}`
       : `<div class="empty"><strong>${esc(data.message)}</strong>No active measurement was started.</div>`;
     $("pagination").innerHTML = numberedPagination(data,query,prefixPage,metadataPage);
   } catch (error) {
