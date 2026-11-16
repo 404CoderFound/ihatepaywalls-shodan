@@ -39,6 +39,7 @@ IMAGE = "scanlattice-prodweb:cve-bulk-v1"
 BASE_HEALTH = "https://scanlattice.plezi.eu/api/health"
 JS_URL = "https://scanlattice.plezi.eu/static/cve-v3.js"
 CSS_URL = "https://scanlattice.plezi.eu/static/site-clean.css"
+SEARCH_JS_URL = "https://scanlattice.plezi.eu/static/search-dedup.js"
 REPORT_URL = "https://scanlattice.plezi.eu/static/cve-v3-public.json"
 
 
