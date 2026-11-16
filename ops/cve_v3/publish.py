@@ -34,6 +34,7 @@ STYLE = Path("/usr/local/lib/scanlattice/cve_v3/site-clean.css")
 SEARCH_SCRIPT = Path("/usr/local/lib/scanlattice/cve_v3/search-dedup.js")
 SCRIPT_TAG = '<script src="/static/cve-v3.js" defer></script>'
 STYLE_TAG = '<link rel="stylesheet" href="/static/site-clean.css">'
+SEARCH_TAG = '<script src="/static/search-dedup.js" defer></script>'
 IMAGE = "scanlattice-prodweb:cve-bulk-v1"
 BASE_HEALTH = "https://scanlattice.plezi.eu/api/health"
 JS_URL = "https://scanlattice.plezi.eu/static/cve-v3.js"
