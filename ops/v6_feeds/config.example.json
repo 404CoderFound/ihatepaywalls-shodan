@@ -1,0 +1,11 @@
+{
+  "api_base": "http://127.0.0.1:8080",
+  "admin_token_file": "/etc/scanlattice/v6-feeds/admin-token",
+  "state_dir": "/var/lib/scanlattice-feeds",
+  "allowed_https_hosts": [],
+  "batch_records": 250,
+  "batch_bytes": 524288,
+  "max_source_bytes": 1073741824,
+  "max_batches_per_run": 200,
+  "sources": []
+}
