@@ -7,6 +7,7 @@
   const observed = new WeakSet();
   let timer = 0;
   let searchRunning = false;
+  let rerunAfterBusy = false;
 
   function ipFromCard(card) {
     const link = card.querySelector('h3 a[href^="#host?ip="]');
@@ -91,7 +92,7 @@
     const out = document.getElementById("result-items");
     if (!page || page.classList.contains("hidden") || !out) return;
     if (out.textContent.includes("Loading public index")) return;
-    if (searchRunning) return;
+    if (searchRunning) { rerunAfterBusy = true; return; }
     searchRunning = true;
     const hash = location.hash;
     try {
@@ -149,6 +150,10 @@
       }
     } finally {
       searchRunning = false;
+      if (rerunAfterBusy) {
+        rerunAfterBusy = false;
+        schedule();
+      }
     }
   }
 
