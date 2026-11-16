@@ -257,6 +257,7 @@ def prepare_static():
         atomic_bytes(PUBLISHED / "index.html",
                      patched_index((PUBLISHED / "index.html").read_text()).encode())
         atomic_copy(SCRIPT, PUBLISHED / "cve-v3.js")
+        atomic_copy(SEARCH_SCRIPT, PUBLISHED / "search-dedup.js")
         atomic_copy(STYLE, PUBLISHED / "site-clean.css")
         atomic_copy(LOCAL_REPORT, PUBLISHED / "cve-v3-public.json")
 
