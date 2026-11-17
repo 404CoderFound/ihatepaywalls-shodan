@@ -191,3 +191,7 @@ The importer accepts service observations (including common Shodan-style `ip_str
 ### Vulnerability feeds
 
 `POST /api/admin/vulnerabilities/refresh` accepts `{"providers":["nvd","kev"],"max_pages":20}`. NVD uses its official CVE API and KEV uses CISA's published catalog. NVD modified-date pagination is resumable across bounded runs; set `NVD_API_KEY` to use the registered API quota. Optional daily refresh starts only when `VULNERABILITY_AUTO_REFRESH=true`. Current feed health and cursor are available at `GET /api/admin/vulnerabilities/providers`. Feed network calls were not made during local tests; provider parsers and paging were tested with fixtures.
+
+## Experimental V6 continuous feed indexing
+
+The optional V6 feed watcher lives in [`ops/v6_feeds/`](ops/v6_feeds/README.md). It uses the existing authenticated dataset-import endpoint to continuously ingest pre-approved JSONL/CSV or gzip exports in small, restart-safe batches. It does **not** scan dataset addresses, bypass authorization, or ship licensed public datasets. It is staged separately from the production web image and is not enabled by default.
